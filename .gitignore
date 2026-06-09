@@ -1,0 +1,30 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Cargo lock (keep for binaries, ignore for libraries — this is a binary workspace)
+# Cargo.lock  ← keep this file committed
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Env / secrets
+.env
+.env.local
+*.key
+*.pem
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+
+# Embedded model cache (downloaded at runtime)
+models/
+
+# Test artifacts
+/tests/tmp/

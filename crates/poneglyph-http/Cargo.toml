@@ -1,0 +1,16 @@
+[package]
+name    = "poneglyph-http"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+poneglyph-core = { workspace = true }
+axum           = { workspace = true }
+tower          = { workspace = true }
+tower-http     = { workspace = true }
+rust-embed     = { workspace = true }
+tokio          = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+anyhow         = { workspace = true }
+tracing        = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name    = "poneglyph-mcp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+poneglyph-core = { workspace = true }
+rmcp           = { workspace = true }
+tokio          = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+anyhow         = { workspace = true }
+tracing        = { workspace = true }

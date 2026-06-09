@@ -1,0 +1,250 @@
+# =============================================================================
+# memagent — workspace Cargo.toml
+# Revised stack: embed_anything (candle backend) · rmcp · axum · rusqlite+sqlite-vec
+# =============================================================================
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/memagent-core",   # storage, embeddings, graph, enrichment queue
+    "crates/memagent-mcp",    # rmcp stdio MCP server  (the universal agent interface)
+    "crates/memagent-http",   # axum HTTP server: ingest hooks + viewer API
+    "crates/memagent-cli",    # binary entry point; wires crates together
+]
+
+# ---------------------------------------------------------------------------
+# Shared dependency versions — bump here, inherits everywhere
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+
+# ── Async runtime ────────────────────────────────────────────────────────────
+tokio          = { version = "1",  features = ["full"] }
+tokio-util     = { version = "0.7" }
+
+# ── MCP (official Rust SDK) ──────────────────────────────────────────────────
+# Use stdio transport for local agents (Claude Code, opencode, Hermes, chat UIs)
+# Switch to Streamable HTTP transport only when you go multi-user / remote
+rmcp           = { version = "1",  features = ["server", "transport-io", "macros"] }
+
+# ── HTTP server (viewer + ingest hook endpoint) ──────────────────────────────
+# NO gRPC / Tonic / Protobuf — localhost JSON over axum is not your bottleneck
+axum           = { version = "0.8", features = ["json", "ws"] }
+tower          = { version = "0.5" }
+tower-http     = { version = "0.6", features = ["cors", "fs", "trace"] }
+
+# ── Embeddings — candle backend, no ONNX runtime, no PyTorch ─────────────────
+# embed_anything wraps candle; works with any HF model; static-link friendly.
+# Native Rust API: EmbedderBuilder::new()
+#     .model_architecture("bert")           // or "jina", "modernbert", etc.
+#     .model_id(Some("BAAI/bge-small-en-v1.5"))
+#     .from_pretrained_hf()?
+# Swap the model ID later (nomic-embed-text-v2, ModernBERT-base) without
+# touching your pipeline code.
+embed_anything = { version = "0.6", default-features = false, features = ["candle"] }
+# NOTE: embed_anything also supports "onnx" feature if you ever want the ONNX
+# backend for a specific model — the trait is the same, just change the feature.
+
+# ── Storage: ONE SQLite file for everything ───────────────────────────────────
+#
+# memories table   → standard BLOB + metadata columns
+# vec0 virtual table (sqlite-vec)  → vector search (brute-force, ~3ms at 100k × 384d int8)
+# fts5 virtual table (built-in)    → keyword fallback
+# edges table      → graph: (src_id, dst_id, edge_type, weight, created_at)
+#                    traversal via recursive CTEs, no separate graph DB needed
+#
+# CAVEAT: sqlite-vec is pre-v1 — API may have breaking changes.
+# If churn is a concern, switch to libsql (Turso SQLite fork, native vector search).
+rusqlite       = { version = "0.32", features = ["bundled"] }   # bundled = static link
+sqlite-vec     = { version = "0.1",  features = ["bundled"] }   # vector search extension
+deadpool-sqlite = { version = "0.9" }  # async pool; rusqlite is sync, wrap in spawn_blocking
+
+# ── In-memory working cache ──────────────────────────────────────────────────
+moka           = { version = "0.12", features = ["future"] }    # async TTL + size eviction
+
+# ── Background enrichment queue ──────────────────────────────────────────────
+# Phase 1: tokio mpsc (in-process, ephemeral — good enough until you need
+#           durable jobs across restarts)
+# Phase 2: swap for apalis = { version = "0.6", features = ["sqlite"] }
+#           apalis uses SQLite as its job store — zero new infra, same db file
+
+# ── Optional LLM calls (summarisation, entity extraction, importance scoring) ─
+# async-openai points at any OpenAI-compatible endpoint:
+#   Ollama  → http://localhost:11434/v1
+#   llama.cpp server → http://localhost:8080/v1
+#   OpenAI/Anthropic  → their API URLs
+# No LLM calls are made unless the user enables enrichment in settings.
+async-openai   = { version = "0.27" }
+
+# ── Static viewer embedding ───────────────────────────────────────────────────
+# TanStack Start build output compiled into the binary at build time
+rust-embed     = { version = "8",   features = ["axum"] }
+
+# ── Serialisation / wire format ───────────────────────────────────────────────
+serde          = { version = "1",   features = ["derive"] }
+serde_json     = { version = "1" }
+# MessagePack and Protobuf removed — not needed at single-machine scale
+
+# ── Error handling + logging ──────────────────────────────────────────────────
+anyhow         = { version = "1" }
+thiserror      = { version = "2" }
+tracing        = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+clap           = { version = "4",   features = ["derive", "env"] }
+
+# ── Config ────────────────────────────────────────────────────────────────────
+figment        = { version = "0.10", features = ["toml", "env"] }
+
+# ── UUID / time ───────────────────────────────────────────────────────────────
+uuid           = { version = "1",   features = ["v7"] }   # v7 = time-sortable
+chrono         = { version = "0.4", features = ["serde"] }
+
+# ── Graph algorithms (optional, viewer only) ─────────────────────────────────
+# Only pull in if you need centrality / clustering in the React Flow viewer.
+# The graph itself lives in the edges table; petgraph is just for algorithms.
+petgraph       = { version = "0.6", optional = true }
+
+
+# =============================================================================
+# crates/memagent-core
+# =============================================================================
+# [package]
+# name    = "memagent-core"
+# version = "0.1.0"
+# edition = "2021"
+#
+# [dependencies]
+# tokio          = { workspace = true }
+# embed_anything = { workspace = true }
+# rusqlite       = { workspace = true }
+# sqlite-vec     = { workspace = true }
+# deadpool-sqlite = { workspace = true }
+# moka           = { workspace = true }
+# async-openai   = { workspace = true }
+# serde          = { workspace = true }
+# serde_json     = { workspace = true }
+# anyhow         = { workspace = true }
+# thiserror      = { workspace = true }
+# tracing        = { workspace = true }
+# uuid           = { workspace = true }
+# chrono         = { workspace = true }
+
+
+# =============================================================================
+# crates/memagent-mcp
+# =============================================================================
+# [package]
+# name    = "memagent-mcp"
+# version = "0.1.0"
+# edition = "2021"
+#
+# [dependencies]
+# memagent-core  = { path = "../memagent-core" }
+# rmcp           = { workspace = true }
+# tokio          = { workspace = true }
+# serde          = { workspace = true }
+# serde_json     = { workspace = true }
+# anyhow         = { workspace = true }
+# tracing        = { workspace = true }
+#
+# ── MCP tools exposed (implement with #[tool] macro from rmcp) ───────────────
+# remember(content, memory_type, importance, llm_assist) → memory_id
+# recall(query, filters, limit)                          → Vec<Memory>
+# forget(id)                                             → ()
+# update_memory(id, new_content)                         → ()
+# get_project_context(project_path, max_tokens)          → String (injected prompt)
+# list_memories(filters)                                 → Vec<Memory>
+
+
+# =============================================================================
+# crates/memagent-http
+# =============================================================================
+# [package]
+# name    = "memagent-http"
+# version = "0.1.0"
+# edition = "2021"
+#
+# [dependencies]
+# memagent-core  = { path = "../memagent-core" }
+# axum           = { workspace = true }
+# tower          = { workspace = true }
+# tower-http     = { workspace = true }
+# rust-embed     = { workspace = true }
+# tokio          = { workspace = true }
+# serde          = { workspace = true }
+# serde_json     = { workspace = true }
+# anyhow         = { workspace = true }
+# tracing        = { workspace = true }
+#
+# ── Two responsibilities ─────────────────────────────────────────────────────
+# 1. /ingest  POST endpoint → passive capture from Claude Code hooks, opencode
+#             plugins, or any HTTP-capable client shim.
+#             A Claude Code hook is literally: curl -s -X POST localhost:3001/ingest \
+#                 -H "Content-Type: application/json" \
+#                 -d '{"event":"tool_use","tool":"Bash","content":"..."}'
+#
+# 2. /api/*   REST endpoints for the TanStack Start viewer (memories, graph,
+#             search, settings). Same core, different surface.
+#
+# Static viewer files embedded at compile time via rust-embed.
+
+
+# =============================================================================
+# crates/memagent-cli
+# =============================================================================
+# [package]
+# name    = "memagent-cli"
+# version = "0.1.0"
+# edition = "2021"
+#
+# [[bin]]
+# name = "memagent"
+# path = "src/main.rs"
+#
+# [dependencies]
+# memagent-core  = { path = "../memagent-core" }
+# memagent-mcp   = { path = "../memagent-mcp" }
+# memagent-http  = { path = "../memagent-http" }
+# tokio          = { workspace = true }
+# clap           = { workspace = true }
+# figment        = { workspace = true }
+# tracing        = { workspace = true }
+# tracing-subscriber = { workspace = true }
+# anyhow         = { workspace = true }
+#
+# ── CLI commands ─────────────────────────────────────────────────────────────
+# memagent serve          → spawns MCP stdio server + HTTP server concurrently
+# memagent remember "..."  → one-shot CLI capture
+# memagent recall "..."    → one-shot CLI search
+# memagent forget <id>     → delete
+# memagent export          → dump memories as JSON/Markdown
+
+
+# =============================================================================
+# Recommended default embedding model
+# =============================================================================
+# BAAI/bge-small-en-v1.5   — 384d, ~33MB, strong retrieval, fast CPU inference
+#   embed_anything code:
+#     let embedder = EmbedderBuilder::new()
+#         .model_architecture("bert")
+#         .model_id(Some("BAAI/bge-small-en-v1.5"))
+#         .from_pretrained_hf()?;
+#
+# Easy upgrade path (same 384d, same sqlite-vec schema, just change model_id):
+#   nomic-ai/nomic-embed-text-v1.5   — better long-context
+#   BAAI/bge-m3                      — multilingual (relevant for BTN use cases)
+#   answerdotai/ModernBERT-base      — newer architecture, supported by embed_anything
+
+
+# =============================================================================
+# What was deliberately removed from the original design doc
+# =============================================================================
+# ✗ SurrealDB        → replaced by plain edges table in SQLite (simpler, same file)
+# ✗ Tonic/gRPC       → not needed at single-machine scale; axum JSON is fine
+# ✗ Protobuf         → same reason; serde_json is plenty fast
+# ✗ MessagePack      → same reason
+# ✗ ONNX Runtime     → replaced by embed_anything candle backend (pure Rust)
+# ✗ Cloud tier       → deferred; StorageBackend trait keeps the door open
+# ✗ Custom JSON-RPC  → replaced by rmcp (official SDK, 1.x, handles transport)
+# ✗ HTTP+SSE transport → deprecated since MCP spec 2025-03-26; use stdio locally

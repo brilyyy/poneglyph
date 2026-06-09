@@ -1,0 +1,82 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/poneglyph-core",
+    "crates/poneglyph-mcp",
+    "crates/poneglyph-http",
+    "crates/poneglyph-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Brilyan"]
+license = "MIT"
+
+# ---------------------------------------------------------------------------
+# Shared dependency versions
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+
+# Async runtime
+tokio          = { version = "1",   features = ["full"] }
+tokio-util     = { version = "0.7" }
+
+# MCP (official Rust SDK, stdio transport)
+rmcp           = { version = "1",   features = ["server", "transport-io", "macros"] }
+
+# HTTP server
+axum           = { version = "0.8", features = ["json", "ws"] }
+tower          = { version = "0.5" }
+tower-http     = { version = "0.6", features = ["cors", "fs", "trace"] }
+
+# Embeddings — candle backend is the default (no ONNX / Python)
+embed_anything = { version = "0.6", default-features = false }
+
+# Pin candle to avoid embed_anything incompatibility
+candle-core = { version = "=0.9.1" }
+
+# Storage
+rusqlite        = { version = "0.32", features = ["bundled"] }
+sqlite-vec      = { version = "0.1" }
+deadpool-sqlite = { version = "0.9" }
+
+# In-memory cache
+moka = { version = "0.12", features = ["future"] }
+
+# Optional LLM calls (OpenAI-compatible endpoint)
+async-openai = { version = "0.27" }
+
+# Static viewer embedding
+rust-embed = { version = "8", features = ["axum"] }
+
+# Serialisation
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+
+# Error handling + logging
+anyhow             = { version = "1" }
+thiserror          = { version = "2" }
+tracing            = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Config
+figment     = { version = "0.10", features = ["toml", "env"] }
+directories = { version = "5" }
+
+# UUID / time
+uuid   = { version = "1",   features = ["v7"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Byte conversion for sqlite-vec — manual impl, no dep needed
+
+# Graph algorithms (viewer only, optional)
+petgraph = { version = "0.6" }
+
+# Internal crates
+poneglyph-core = { path = "crates/poneglyph-core" }
+poneglyph-mcp  = { path = "crates/poneglyph-mcp" }
+poneglyph-http = { path = "crates/poneglyph-http" }
