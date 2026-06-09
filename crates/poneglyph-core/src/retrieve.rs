@@ -137,11 +137,26 @@ fn dense_recall(
     Ok(results)
 }
 
+/// FTS5 MATCH has its own query syntax; raw natural-language input (apostrophes,
+/// `?`, `-`) is a syntax error. Quote each alphanumeric token and OR them.
+fn sanitize_fts_query(query: &str) -> String {
+    query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 fn sparse_recall(
     conn: &rusqlite::Connection,
     query_text: &str,
     limit: usize,
 ) -> Result<Vec<(String, f64)>> {
+    let query_text = sanitize_fts_query(query_text);
+    if query_text.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut stmt = conn.prepare(
         "SELECT memory_id, rank FROM fts_memories WHERE fts_memories MATCH ?1 ORDER BY rank LIMIT ?2",
     )?;
@@ -222,14 +237,19 @@ fn compute_rrf(
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Hybrid recall. `query_vec: None` skips the dense path entirely (e.g. when
+/// no embedding model is available) instead of polluting RRF with a zero-vector.
 pub fn recall(
     conn: &rusqlite::Connection,
-    query_vec: &[f32],
+    query_vec: Option<&[f32]>,
     query_text: &str,
     filters: &RecallFilters,
     limit: usize,
 ) -> Result<Vec<RecallResult>> {
-    let dense = dense_recall(conn, query_vec, limit)?;
+    let dense = match query_vec {
+        Some(v) => dense_recall(conn, v, limit)?,
+        None => Vec::new(),
+    };
     let sparse = sparse_recall(conn, query_text, limit)?;
 
     // Seed IDs for graph expansion (union of top dense + sparse)

@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tracing_subscriber::EnvFilter;
 
 use poneglyph_core::config::Config;
+use poneglyph_core::embed::Embedder;
 use poneglyph_core::model::{MemoryType, Source};
 use poneglyph_core::store::Store;
 
@@ -63,7 +65,9 @@ fn load_config(cli_config: &Option<PathBuf>) -> Result<Config> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Log to stderr: `poneglyph serve` speaks MCP JSON-RPC on stdout.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(EnvFilter::from_default_env().add_directive("poneglyph=info".parse()?))
         .init();
 
@@ -74,9 +78,9 @@ async fn main() -> Result<()> {
         Command::Init => cmd_init(&config),
         Command::Serve => cmd_serve(&config).await,
         Command::Remember { content, r#type, importance, project, tag } => {
-            cmd_remember(&config, &content, &r#type, importance, project.as_deref(), &tag)
+            cmd_remember(&config, &content, &r#type, importance, project.as_deref(), &tag).await
         }
-        Command::Recall { query, limit } => cmd_recall(&config, &query, limit),
+        Command::Recall { query, limit } => cmd_recall(&config, &query, limit).await,
         Command::Forget { id } => cmd_forget(&config, &id),
         Command::Export { format } => cmd_export(&config, &format),
         Command::Status => cmd_status(&config),
@@ -103,19 +107,35 @@ fn cmd_init(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Load the embedding model, degrading to FTS-only operation on failure
+/// (e.g. first run while offline).
+async fn try_embedder(config: &Config) -> Option<Arc<Embedder>> {
+    match Embedder::new(config).await {
+        Ok(e) => Some(Arc::new(e)),
+        Err(e) => {
+            tracing::warn!(error = %e, "embedding model unavailable — running keyword-only");
+            None
+        }
+    }
+}
+
 async fn cmd_serve(config: &Config) -> Result<()> {
     config.ensure_dirs()?;
     let store = Store::open(&config.db_path).context("failed to open database")?;
-    let _ = store; // Placeholder — MCP + HTTP servers will be wired in later phases
-    println!("Starting poneglyph server...");
-    println!("MCP stdio server: active");
-    println!("HTTP server: {}:{}", config.server.bind_addr, config.server.http_port);
-    // TODO: MCP + HTTP server implementation (Phase M2-M4)
-    tokio::signal::ctrl_c().await?;
-    Ok(())
+    let store = Arc::new(Mutex::new(store));
+    let embedder = try_embedder(config).await;
+
+    // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
+    // HTTP server joins this select in Phase M4.
+    let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(
+        Arc::clone(&store),
+        embedder,
+        Arc::new(config.clone()),
+    );
+    poneglyph_mcp::server::run_stdio(mcp).await
 }
 
-fn cmd_remember(
+async fn cmd_remember(
     config: &Config,
     content: &str,
     memory_type: &str,
@@ -125,6 +145,7 @@ fn cmd_remember(
 ) -> Result<()> {
     config.ensure_dirs()?;
     let store = Store::open(&config.db_path)?;
+    let embedder = try_embedder(config).await;
 
     let mem_type: MemoryType = memory_type.parse().unwrap_or(MemoryType::Semantic);
 
@@ -155,21 +176,31 @@ fn cmd_remember(
         metadata.as_ref(),
     )?;
 
-    // Index FTS
+    // Index FTS + vector
     store.index_fts(&mem.id, content)?;
+    if let Some(embedder) = &embedder {
+        let vec = embedder.embed_text(content).await?;
+        store.index_embedding(&mem.id, &vec)?;
+    }
 
     println!("{}", mem.id);
     Ok(())
 }
 
-fn cmd_recall(config: &Config, query: &str, limit: usize) -> Result<()> {
+async fn cmd_recall(config: &Config, query: &str, limit: usize) -> Result<()> {
     config.ensure_dirs()?;
     let store = Store::open(&config.db_path)?;
+    let embedder = try_embedder(config).await;
+
+    let query_vec = match &embedder {
+        Some(e) => Some(e.embed_text(query).await?),
+        None => None,
+    };
 
     let filters = poneglyph_core::retrieve::RecallFilters::default();
     let results = poneglyph_core::retrieve::recall(
         &store.conn,
-        &vec![0.0; config.embedding.dimensions], // Placeholder — real embedding needs model
+        query_vec.as_deref(),
         query,
         &filters,
         limit,

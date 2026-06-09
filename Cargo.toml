@@ -53,6 +53,7 @@ rust-embed = { version = "8", features = ["axum"] }
 # Serialisation
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
+schemars   = { version = "1.2" }
 
 # Error handling + logging
 anyhow             = { version = "1" }

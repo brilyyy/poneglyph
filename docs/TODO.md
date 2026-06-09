@@ -13,7 +13,7 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 - [x] Workspace Cargo.toml with shared workspace.dependencies
 - [x] 4 crates scaffolded (poneglyph-{core,mcp,http,cli}) + module stubs
 - [x] .gitignore
-- [x] Delete stale top-level src/main.rs
+- [>] Delete stale top-level src/main.rs
 - [x] Implement core::model
 - [x] Implement core::config
 - [x] Implement core::store + migration runner
@@ -39,10 +39,10 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 
 > Exit: Claude Code round-trip store+recall works (§8.6 AC1–2).
 
-- [ ] Implement mcp::server (rmcp stdio bootstrap)
-- [ ] Implement mcp::tools (6 tools via #[tool]: remember recall forget update_memory get_project_context list_memories)
-- [ ] poneglyph serve starts MCP stdio server
-- [ ] Integration test: rmcp in-process client; assert DB side effects
+- [x] Implement mcp::server (rmcp stdio bootstrap)
+- [x] Implement mcp::tools (6 tools via #[tool]: remember recall forget update_memory get_project_context list_memories)
+- [x] poneglyph serve starts MCP stdio server
+- [x] Integration test: rmcp in-process client; assert DB side effects
 - [ ] Manual verify: Claude Code + Claude Desktop MCP round-trip
 
 ---
