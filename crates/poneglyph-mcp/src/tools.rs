@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use poneglyph_core::config::Config;
 use poneglyph_core::embed::Embedder;
+use poneglyph_core::enrich::{self, EnrichHandle};
 use poneglyph_core::model::{Memory, MemoryType, Source};
 use poneglyph_core::retrieve::RecallFilters;
 use poneglyph_core::store::Store;
@@ -164,6 +165,9 @@ pub struct PoneglyphMcp {
     /// None ⇒ degrade gracefully: FTS-only recall, no vec indexing.
     embedder: Option<Arc<Embedder>>,
     config: Arc<Config>,
+    /// Wake-up handle for the background edge worker; edge jobs are still
+    /// enqueued without it and drained on the next worker poll.
+    enrich: Option<EnrichHandle>,
 }
 
 fn internal(e: impl std::fmt::Display) -> ErrorData {
@@ -172,7 +176,12 @@ fn internal(e: impl std::fmt::Display) -> ErrorData {
 
 impl PoneglyphMcp {
     pub fn new(store: Arc<Mutex<Store>>, embedder: Option<Arc<Embedder>>, config: Arc<Config>) -> Self {
-        Self { store, embedder, config }
+        Self { store, embedder, config, enrich: None }
+    }
+
+    pub fn with_enrich(mut self, handle: EnrichHandle) -> Self {
+        self.enrich = Some(handle);
+        self
     }
 
     fn lock_store(&self) -> Result<std::sync::MutexGuard<'_, Store>, ErrorData> {
@@ -243,8 +252,16 @@ impl PoneglyphMcp {
                 store.index_embedding(&mem.id, vec).map_err(internal)?;
             }
 
+            // Edge computation is queued, never run here (§8.4).
+            // llm_assist additionally enqueues LLM jobs starting in M6.
+            enrich::enqueue_compute_edges(&store, &mem.id).map_err(internal)?;
+
             mem.id
         };
+
+        if let Some(h) = &self.enrich {
+            h.notify();
+        }
 
         Ok(Json(RememberResult { id }))
     }
@@ -310,16 +327,25 @@ impl PoneglyphMcp {
         // Re-embed before locking.
         let embedding = self.embed_or_none(&req.new_content).await?;
 
-        let store = self.lock_store()?;
-        let updated = store
-            .update_memory(&req.id, &req.new_content)
-            .map_err(internal)?;
+        let updated = {
+            let store = self.lock_store()?;
+            let updated = store
+                .update_memory(&req.id, &req.new_content)
+                .map_err(internal)?;
 
-        if updated {
-            store.index_fts(&req.id, &req.new_content).map_err(internal)?;
-            if let Some(vec) = &embedding {
-                store.index_embedding(&req.id, vec).map_err(internal)?;
+            if updated {
+                store.index_fts(&req.id, &req.new_content).map_err(internal)?;
+                if let Some(vec) = &embedding {
+                    store.index_embedding(&req.id, vec).map_err(internal)?;
+                }
+                // Content changed ⇒ similarity edges may have changed.
+                enrich::enqueue_compute_edges(&store, &req.id).map_err(internal)?;
             }
+            updated
+        };
+
+        if updated && let Some(h) = &self.enrich {
+            h.notify();
         }
 
         Ok(Json(UpdateMemoryResult { id: req.id, updated }))

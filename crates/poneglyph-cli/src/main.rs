@@ -125,14 +125,22 @@ async fn cmd_serve(config: &Config) -> Result<()> {
     let store = Arc::new(Mutex::new(store));
     let embedder = try_embedder(config).await;
 
+    // Background edge worker on its own connection (WAL).
+    let (enrich, worker) =
+        poneglyph_core::enrich::spawn_worker(config.db_path.clone(), config.graph.clone());
+
     // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
     // HTTP server joins this select in Phase M4.
     let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(
         Arc::clone(&store),
         embedder,
         Arc::new(config.clone()),
-    );
-    poneglyph_mcp::server::run_stdio(mcp).await
+    )
+    .with_enrich(enrich);
+
+    let result = poneglyph_mcp::server::run_stdio(mcp).await;
+    worker.abort(); // MCP client gone; no more producers
+    result
 }
 
 async fn cmd_remember(
@@ -183,6 +191,11 @@ async fn cmd_remember(
         store.index_embedding(&mem.id, &vec)?;
     }
 
+    // One-shot process: enqueue the edge job, then drain inline so edges
+    // exist without a running server (no-LLM builders are cheap).
+    poneglyph_core::enrich::enqueue_compute_edges(&store, &mem.id)?;
+    poneglyph_core::enrich::process_pending_jobs(&store, &config.graph)?;
+
     println!("{}", mem.id);
     Ok(())
 }
@@ -212,7 +225,8 @@ async fn cmd_recall(config: &Config, query: &str, limit: usize) -> Result<()> {
     }
 
     for r in &results {
-        println!("[{:.4}] {} — {}", r.score, &r.memory.id[..8], truncate(&r.memory.content, 80));
+        // Full id: UUIDv7 prefixes are timestamps, so short prefixes collide.
+        println!("[{:.4}] {} — {}", r.score, r.memory.id, truncate(&r.memory.content, 80));
     }
 
     Ok(())

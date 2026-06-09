@@ -13,8 +13,8 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 - [x] Workspace Cargo.toml with shared workspace.dependencies
 - [x] 4 crates scaffolded (poneglyph-{core,mcp,http,cli}) + module stubs
 - [x] .gitignore
-- [>] Delete stale top-level src/main.rs
-- [x] Implement core::model
+- [x] Delete stale top-level src/main.rs
+- [>] Implement core::model
 - [x] Implement core::config
 - [x] Implement core::store + migration runner
 - [x] Implement `poneglyph init` CLI command
@@ -51,11 +51,11 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 
 > Exit: §8.4 AC pass; edges visible via API.
 
-- [ ] core::enrich queue (tokio mpsc background worker, jobs table groundwork)
-- [ ] core::graph no-LLM builders: explicit, similarity (cosine ≥ 0.82), temporal (5min window), tag-overlap
-- [ ] Edge computation enqueued on remember; never blocks
-- [ ] Unique edge constraint respected on recompute (§8.4 AC2)
-- [ ] Unit tests: deterministic edge builders given fixtures
+- [x] core::enrich queue (tokio mpsc background worker, jobs table groundwork)
+- [x] core::graph no-LLM builders: explicit, similarity (cosine ≥ 0.82), temporal (5min window), tag-overlap
+- [x] Edge computation enqueued on remember; never blocks
+- [x] Unique edge constraint respected on recompute (§8.4 AC2)
+- [x] Unit tests: deterministic edge builders given fixtures
 
 ---
 

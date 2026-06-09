@@ -119,6 +119,8 @@ impl std::str::FromStr for EdgeType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobType {
+    /// No-LLM edge computation (similarity/temporal/tag-overlap) — always on.
+    ComputeEdges,
     Summarize,
     ExtractEntities,
     ExtractRelations,
@@ -128,6 +130,7 @@ pub enum JobType {
 impl std::fmt::Display for JobType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
+            Self::ComputeEdges => "compute_edges",
             Self::Summarize => "summarize",
             Self::ExtractEntities => "extract_entities",
             Self::ExtractRelations => "extract_relations",
@@ -141,6 +144,7 @@ impl std::str::FromStr for JobType {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "compute_edges" => Ok(Self::ComputeEdges),
             "summarize" => Ok(Self::Summarize),
             "extract_entities" => Ok(Self::ExtractEntities),
             "extract_relations" => Ok(Self::ExtractRelations),

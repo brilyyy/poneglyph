@@ -79,6 +79,14 @@ async fn mcp_round_trip_store_and_recall() -> anyhow::Result<()> {
             |r| r.get(0),
         )?;
         assert_eq!(fts_count, 1, "FTS indexed");
+
+        // M3: remember enqueues edge computation instead of running it inline.
+        let job_count: i64 = check.conn.query_row(
+            "SELECT COUNT(*) FROM jobs WHERE memory_id = ?1 AND job_type = 'compute_edges'",
+            [&id],
+            |r| r.get(0),
+        )?;
+        assert_eq!(job_count, 1, "compute_edges job enqueued");
     }
 
     // --- recall (sparse path; no embedder in test) ---
