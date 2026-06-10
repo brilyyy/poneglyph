@@ -2,7 +2,7 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|Bash|NotebookEdit",
+        "matcher": "Edit|Write|MultiEdit|Bash|NotebookEdit|Agent|Task",
         "hooks": [
           {
             "type": "command",
@@ -19,6 +19,17 @@
             "type": "command",
             "command": "$HOME/.config/poneglyph/hooks/userpromptsubmit.sh",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.config/poneglyph/hooks/stop.sh",
+            "timeout": 10
           }
         ]
       }
