@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as TimelineRouteImport } from './routes/timeline'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as SearchRouteImport } from './routes/search'
 import { Route as GraphRouteImport } from './routes/graph'
@@ -16,6 +17,11 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as MemoriesIndexRouteImport } from './routes/memories.index'
 import { Route as MemoriesIdRouteImport } from './routes/memories.$id'
 
+const TimelineRoute = TimelineRouteImport.update({
+  id: '/timeline',
+  path: '/timeline',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -52,6 +58,7 @@ export interface FileRoutesByFullPath {
   '/graph': typeof GraphRoute
   '/search': typeof SearchRoute
   '/settings': typeof SettingsRoute
+  '/timeline': typeof TimelineRoute
   '/memories/$id': typeof MemoriesIdRoute
   '/memories/': typeof MemoriesIndexRoute
 }
@@ -60,6 +67,7 @@ export interface FileRoutesByTo {
   '/graph': typeof GraphRoute
   '/search': typeof SearchRoute
   '/settings': typeof SettingsRoute
+  '/timeline': typeof TimelineRoute
   '/memories/$id': typeof MemoriesIdRoute
   '/memories': typeof MemoriesIndexRoute
 }
@@ -69,6 +77,7 @@ export interface FileRoutesById {
   '/graph': typeof GraphRoute
   '/search': typeof SearchRoute
   '/settings': typeof SettingsRoute
+  '/timeline': typeof TimelineRoute
   '/memories/$id': typeof MemoriesIdRoute
   '/memories/': typeof MemoriesIndexRoute
 }
@@ -79,16 +88,25 @@ export interface FileRouteTypes {
     | '/graph'
     | '/search'
     | '/settings'
+    | '/timeline'
     | '/memories/$id'
     | '/memories/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/graph' | '/search' | '/settings' | '/memories/$id' | '/memories'
+  to:
+    | '/'
+    | '/graph'
+    | '/search'
+    | '/settings'
+    | '/timeline'
+    | '/memories/$id'
+    | '/memories'
   id:
     | '__root__'
     | '/'
     | '/graph'
     | '/search'
     | '/settings'
+    | '/timeline'
     | '/memories/$id'
     | '/memories/'
   fileRoutesById: FileRoutesById
@@ -98,12 +116,20 @@ export interface RootRouteChildren {
   GraphRoute: typeof GraphRoute
   SearchRoute: typeof SearchRoute
   SettingsRoute: typeof SettingsRoute
+  TimelineRoute: typeof TimelineRoute
   MemoriesIdRoute: typeof MemoriesIdRoute
   MemoriesIndexRoute: typeof MemoriesIndexRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/timeline': {
+      id: '/timeline'
+      path: '/timeline'
+      fullPath: '/timeline'
+      preLoaderRoute: typeof TimelineRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings': {
       id: '/settings'
       path: '/settings'
@@ -154,6 +180,7 @@ const rootRouteChildren: RootRouteChildren = {
   GraphRoute: GraphRoute,
   SearchRoute: SearchRoute,
   SettingsRoute: SettingsRoute,
+  TimelineRoute: TimelineRoute,
   MemoriesIdRoute: MemoriesIdRoute,
   MemoriesIndexRoute: MemoriesIndexRoute,
 }

@@ -6,16 +6,20 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
+  useNodesState,
   type Edge as FlowEdge,
   type Node as FlowNode,
+  type OnNodesChange,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import {
-  forceCenter,
   forceCollide,
   forceLink,
   forceManyBody,
   forceSimulation,
+  forceX,
+  forceY,
+  type Simulation,
   type SimulationNodeDatum,
 } from 'd3-force'
 
@@ -34,6 +38,7 @@ import { Alert, AlertDescription } from '#/components/ui/alert.tsx'
 import { Button } from '#/components/ui/button.tsx'
 import { Card, CardContent } from '#/components/ui/card.tsx'
 import { Spinner } from '#/components/ui/spinner.tsx'
+import FloatingEdge from '#/components/floating-edge.tsx'
 
 type GraphSearch = { focus?: string }
 
@@ -48,32 +53,9 @@ interface SimNode extends SimulationNodeDatum {
   id: string
 }
 
-/** Static d3-force layout: run the simulation synchronously, no animation.
- *  Prior positions seed the next run so expansion is incremental. */
-function layout(
-  memories: Memory[],
-  edges: Edge[],
-  prior: Map<string, { x: number; y: number }>,
-): Map<string, { x: number; y: number }> {
-  const simNodes: SimNode[] = memories.map((m) => {
-    const p = prior.get(m.id)
-    return { id: m.id, x: p?.x, y: p?.y }
-  })
-  const simLinks = edges.map((e) => ({ source: e.src_id, target: e.dst_id }))
-
-  const sim = forceSimulation(simNodes)
-    .force('link', forceLink(simLinks).id((d: any) => d.id).distance(120))
-    .force('charge', forceManyBody().strength(-250))
-    .force('center', forceCenter(0, 0))
-    .force('collide', forceCollide(50))
-    .stop()
-
-  for (let i = 0; i < 300; i++) sim.tick()
-
-  const out = new Map<string, { x: number; y: number }>()
-  for (const n of simNodes) out.set(n.id, { x: n.x ?? 0, y: n.y ?? 0 })
-  return out
-}
+const edgeTypes = { floating: FloatingEdge }
+const NODE_W = 150
+const NODE_H = 50
 
 function GraphPage() {
   const { focus } = Route.useSearch()
@@ -81,7 +63,11 @@ function GraphPage() {
   const [edges, setEdges] = useState<Map<string, Edge>>(new Map())
   const [hidden, setHidden] = useState<Set<EdgeType>>(new Set())
   const [selected, setSelected] = useState<Memory | null>(null)
-  const positionsRef = useRef<Map<string, { x: number; y: number }>>(new Map())
+
+  // Stable SimNode map (d3 mutates these objects; never feed them to ReactFlow).
+  const simNodesRef = useRef<Map<string, SimNode>>(new Map())
+  const simRef = useRef<Simulation<SimNode, Edge> | null>(null)
+  const rafRef = useRef<number>(0)
 
   const initial = useQuery({
     queryKey: ['graph', focus ?? 'sample'],
@@ -89,25 +75,100 @@ function GraphPage() {
       focus ? api.graph({ focus, depth: 1, limit: 500 }) : api.graph({ limit: 500 }),
   })
 
-  // Reset and load when the initial query (or focus) changes.
+  // Initialize or reset on new data.
   useEffect(() => {
     if (!initial.data) return
-    positionsRef.current = new Map()
+    simNodesRef.current = new Map()
     setMemories(new Map(initial.data.nodes.map((n) => [n.id, n])))
     setEdges(new Map(initial.data.edges.map((e) => [e.id, e])))
     setSelected(null)
   }, [initial.data])
 
+  // Sync simulation whenever memories or edges change.
+  useEffect(() => {
+    const memArr = [...memories.values()]
+    const edgeArr = [...edges.values()]
+
+    // Reuse existing SimNodes (preserve positions across expansion).
+    for (const m of memArr) {
+      if (!simNodesRef.current.has(m.id)) {
+        // Seed new nodes near origin; slightly offset to avoid exact overlap.
+        const existing = simNodesRef.current.size
+        simNodesRef.current.set(m.id, {
+          id: m.id,
+          x: existing > 0 ? (Math.random() - 0.5) * 80 : 0,
+          y: existing > 0 ? (Math.random() - 0.5) * 80 : 0,
+        })
+      }
+    }
+
+    const simNodes: SimNode[] = []
+    for (const m of memArr) {
+      const sn = simNodesRef.current.get(m.id)
+      if (sn) simNodes.push(sn)
+    }
+
+    const simLinks = edgeArr.map((e) => ({ source: e.src_id, target: e.dst_id }))
+
+    // Build or reheat simulation.
+    if (!simRef.current) {
+      simRef.current = forceSimulation<SimNode>(simNodes)
+        .force('link', forceLink<SimNode, { source: string; target: string }>(simLinks).id((d) => d.id).distance(180).strength(0.3))
+        .force('charge', forceManyBody<SimNode>().strength(-400).distanceMax(600))
+        .force('x', forceX<SimNode>(0).strength(0.05))
+        .force('y', forceY<SimNode>(0).strength(0.05))
+        .force('collide', forceCollide<SimNode>(85).strength(0.9).iterations(2))
+        .alphaDecay(0.03)
+        .velocityDecay(0.4)
+    } else {
+      simRef.current.nodes(simNodes)
+      const linkForce = simRef.current.force('link') as ReturnType<typeof forceLink>
+      if (linkForce) {
+        linkForce.links(simLinks)
+        linkForce.id((d: any) => d.id)
+      }
+      simRef.current.alpha(0.4).restart()
+    }
+
+    // Tick handler: rAF-throttled position update.
+    simRef.current.on('tick', () => {
+      if (rafRef.current) return // already queued
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = 0
+        setNodes((prev) =>
+          prev.map((n) => {
+            const sn = simNodesRef.current.get(n.id)
+            return sn ? { ...n, position: { x: sn.x ?? 0, y: sn.y ?? 0 } } : n
+          }),
+        )
+      })
+    })
+
+    return () => {
+      // Don't stop simulation on effect cleanup; only stop on unmount.
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memories, edges])
+
+  // Cleanup simulation on unmount.
+  useEffect(() => {
+    return () => {
+      simRef.current?.stop()
+      simRef.current = null
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
+  }, [])
+
   const merge = useCallback((nodes: Memory[], newEdges: Edge[], around?: string) => {
     setMemories((prev) => {
       const next = new Map(prev)
-      const origin = around ? positionsRef.current.get(around) : undefined
+      const origin = around ? simNodesRef.current.get(around) : undefined
       for (const n of nodes) {
         if (!next.has(n.id)) {
           next.set(n.id, n)
-          // Seed new nodes near the expansion origin so layout stays local.
-          if (origin && !positionsRef.current.has(n.id)) {
-            positionsRef.current.set(n.id, {
+          if (origin && !simNodesRef.current.has(n.id)) {
+            simNodesRef.current.set(n.id, {
+              id: n.id,
               x: origin.x + (Math.random() - 0.5) * 80,
               y: origin.y + (Math.random() - 0.5) * 80,
             })
@@ -129,7 +190,7 @@ function GraphPage() {
         const resp = await api.graph({ focus: id, depth: 1, limit: 100 })
         merge(resp.nodes, resp.edges, id)
       } catch {
-        // Expansion failure is non-fatal; node stays as-is.
+        // Expansion failure is non-fatal.
       }
     },
     [merge],
@@ -138,36 +199,92 @@ function GraphPage() {
   const memoryArr = useMemo(() => [...memories.values()], [memories])
   const edgeArr = useMemo(() => [...edges.values()], [edges])
 
-  const flow = useMemo(() => {
-    const pos = layout(memoryArr, edgeArr, positionsRef.current)
-    positionsRef.current = pos
+  // Build ReactFlow nodes and edges from current state.
+  const flowNodes: FlowNode[] = useMemo(
+    () =>
+      memoryArr.map((m) => {
+        const sn = simNodesRef.current.get(m.id)
+        return {
+          id: m.id,
+          position: { x: sn?.x ?? 0, y: sn?.y ?? 0 },
+          data: { label: truncate(m.content, 40) },
+          style: {
+            backgroundColor: `${TYPE_COLORS[m.memory_type] ?? '#94a3b8'}33`,
+            borderColor: TYPE_COLORS[m.memory_type] ?? '#94a3b8',
+            borderWidth: 2,
+            borderRadius: 10,
+            fontSize: 11,
+            width: NODE_W,
+            padding: 6,
+          },
+        }
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [memoryArr.length],
+  )
 
-    const flowNodes: FlowNode[] = memoryArr.map((m) => ({
-      id: m.id,
-      position: pos.get(m.id) ?? { x: 0, y: 0 },
-      data: { label: truncate(m.content, 40) },
-      style: {
-        backgroundColor: `${TYPE_COLORS[m.memory_type] ?? '#94a3b8'}33`,
-        borderColor: TYPE_COLORS[m.memory_type] ?? '#94a3b8',
-        borderWidth: 2,
-        borderRadius: 10,
-        fontSize: 11,
-        width: 150,
-        padding: 6,
-      },
-    }))
+  // Use useNodesState for controlled node positions during drag.
+  const [nodes, setNodes, onNodesChange] = useNodesState(flowNodes)
 
-    const flowEdges: FlowEdge[] = edgeArr.map((e) => ({
-      id: e.id,
-      source: e.src_id,
-      target: e.dst_id,
-      hidden: hidden.has(e.edge_type),
-      label: e.edge_type === 'relation' ? (e.label ?? undefined) : undefined,
-      style: { strokeWidth: Math.max(1, e.weight * 2) },
-    }))
+  // Sync external flowNodes changes (non-drag).
+  useEffect(() => {
+    setNodes((prev) => {
+      const prevIds = new Set(prev.map((n) => n.id))
+      const nextIds = new Set(flowNodes.map((n) => n.id))
+      // Only update if the node set actually changed.
+      if (prevIds.size === nextIds.size && [...prevIds].every((id) => nextIds.has(id))) {
+        return prev // positions updated via tick handler
+      }
+      return flowNodes
+    })
+  }, [flowNodes, setNodes])
 
-    return { nodes: flowNodes, edges: flowEdges }
-  }, [memoryArr, edgeArr, hidden])
+  const flowEdges: FlowEdge[] = useMemo(
+    () =>
+      edgeArr.map((e) => ({
+        id: e.id,
+        source: e.src_id,
+        target: e.dst_id,
+        type: 'floating' as const,
+        hidden: hidden.has(e.edge_type),
+        label: e.edge_type === 'relation' ? (e.label ?? undefined) : undefined,
+        style: { strokeWidth: Math.max(1, e.weight * 2) },
+      })),
+    [edgeArr, hidden],
+  )
+
+  // Drag handlers.
+  const onNodeDragStart = useCallback(
+    (_: any, node: any) => {
+      const sn = simNodesRef.current.get(node.id)
+      if (!sn) return
+      sn.fx = sn.x
+      sn.fy = sn.y
+      simRef.current?.alphaTarget(0.3).restart()
+    },
+    [],
+  )
+
+  const onNodeDrag = useCallback(
+    (_: any, node: any) => {
+      const sn = simNodesRef.current.get(node.id)
+      if (!sn) return
+      sn.fx = node.position.x
+      sn.fy = node.position.y
+    },
+    [],
+  )
+
+  const onNodeDragStop = useCallback(
+    (_: any, node: any) => {
+      const sn = simNodesRef.current.get(node.id)
+      if (!sn) return
+      sn.fx = null
+      sn.fy = null
+      simRef.current?.alphaTarget(0)
+    },
+    [],
+  )
 
   if (initial.isLoading)
     return (
@@ -234,8 +351,9 @@ function GraphPage() {
 
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-card">
         <ReactFlow
-          nodes={flow.nodes}
-          edges={flow.edges}
+          nodes={nodes}
+          edges={flowEdges}
+          edgeTypes={edgeTypes}
           fitView
           minZoom={0.05}
           onlyRenderVisibleElements
@@ -246,6 +364,10 @@ function GraphPage() {
             expand(node.id)
           }}
           onPaneClick={() => setSelected(null)}
+          onNodeDragStart={onNodeDragStart}
+          onNodeDrag={onNodeDrag}
+          onNodeDragStop={onNodeDragStop}
+          onNodesChange={onNodesChange as OnNodesChange}
         >
           <Background />
           <Controls />

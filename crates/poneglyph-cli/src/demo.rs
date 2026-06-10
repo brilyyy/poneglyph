@@ -99,7 +99,8 @@ pub fn seed(
         } else {
             format!("{} (variant {})", seed.content, i / SEEDS.len())
         };
-        let metadata = serde_json::json!({ "tags": seed.tags });
+        let session = format!("demo-session-{}", i / 3 + 1);
+        let metadata = serde_json::json!({ "tags": seed.tags, "session_id": session });
 
         let mem = store.create_memory(
             &content,
@@ -174,5 +175,18 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let out = seed(&store, SEEDS.len() + 5, &GraphConfig::default(), None).unwrap();
         assert_eq!(out.memories, SEEDS.len() + 5);
+    }
+
+    #[test]
+    fn seed_rows_carry_session_id() {
+        let store = Store::open_in_memory().unwrap();
+        seed(&store, 6, &GraphConfig::default(), None).unwrap();
+        let (mems, _) = store.list_memories(None, None, 10, 0).unwrap();
+        for mem in &mems {
+            let meta = mem.metadata.as_ref().unwrap();
+            let sid = meta.get("session_id").and_then(|v| v.as_str());
+            assert!(sid.is_some(), "every seeded memory should have a session_id");
+            assert!(sid.unwrap().starts_with("demo-session-"));
+        }
     }
 }

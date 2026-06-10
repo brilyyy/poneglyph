@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
+use serde::Serialize;
 use std::path::Path;
 use std::str::FromStr;
 use tracing::info;
@@ -471,6 +472,140 @@ impl Store {
     }
 
     // -----------------------------------------------------------------------
+    // Sessions / Timeline
+    // -----------------------------------------------------------------------
+
+    /// Fetch all memories ordered by `created_at ASC`, optionally filtered by
+    /// project, then group them into sessions. Rows with a `session_id` in
+    /// metadata (top-level or `extra.session_id`) are grouped by that key.
+    /// Rows without are bucketed per project, splitting when the gap between
+    /// consecutive rows exceeds `gap_secs`.
+    ///
+    /// Returns `(sessions_page, total_session_count)` — sessions sorted by
+    /// `started_at DESC`, paginated by session index (not row count).
+    pub fn list_sessions(
+        &self,
+        project_id: Option<&str>,
+        gap_secs: i64,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SessionGroup>, i64)> {
+        let mut conditions = vec!["1=1".to_string()];
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(pid) = project_id {
+            conditions.push("project_id = ?".to_string());
+            values.push(Box::new(pid.to_string()));
+        }
+
+        let where_clause = conditions.join(" AND ");
+        let sql = format!(
+            "SELECT id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count,
+                    COALESCE(json_extract(metadata, '$.session_id'), json_extract(metadata, '$.extra.session_id')) AS session_key
+             FROM memories WHERE {where_clause} ORDER BY created_at ASC"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+        let rows: Vec<(Memory, Option<String>)> = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                let mem = row_to_memory(row)?;
+                let session_key: Option<String> = row.get(11)?;
+                Ok((mem, session_key))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        // Group into sessions.
+        let mut keyed: std::collections::HashMap<String, Vec<Memory>> = std::collections::HashMap::new();
+        // Unkeyed rows grouped by project, in order.
+        let mut unkeyed_order: Vec<(Option<String>, usize)> = Vec::new(); // (project_id, start_idx)
+        let mut unkeyed_all: Vec<Memory> = Vec::new();
+        // Track current project group.
+        let mut current_unkeyed_project: Option<String> = None;
+        let mut current_unkeyed_start: usize = 0;
+
+        for (mem, session_key) in &rows {
+            if let Some(key) = session_key {
+                keyed.entry(key.clone()).or_default().push(mem.clone());
+            } else {
+                let pid = mem.project_id.clone();
+                if current_unkeyed_project != pid {
+                    if !unkeyed_all.is_empty() {
+                        unkeyed_order.push((current_unkeyed_project, current_unkeyed_start));
+                    }
+                    current_unkeyed_start = unkeyed_all.len();
+                    current_unkeyed_project = pid;
+                }
+                unkeyed_all.push(mem.clone());
+            }
+        }
+        if !unkeyed_all.is_empty() {
+            unkeyed_order.push((current_unkeyed_project, current_unkeyed_start));
+        }
+
+        let gap = chrono::Duration::seconds(gap_secs);
+        let mut sessions: Vec<SessionGroup> = Vec::new();
+
+        // Keyed sessions.
+        for (sid, mems) in &keyed {
+            let first = mems.first().unwrap();
+            let last = mems.last().unwrap();
+            sessions.push(SessionGroup {
+                session_id: Some(sid.clone()),
+                project_id: first.project_id.clone(),
+                started_at: first.created_at.to_rfc3339(),
+                ended_at: last.created_at.to_rfc3339(),
+                memories: mems.clone(),
+            });
+        }
+
+        // Unkeyed sessions: split by gap within each project group.
+        for (_pid, start_idx) in &unkeyed_order {
+            let end_idx = unkeyed_order
+                .iter()
+                .find(|(_, s)| s > start_idx)
+                .map(|(_, s)| *s)
+                .unwrap_or(unkeyed_all.len());
+            let group = &unkeyed_all[*start_idx..end_idx];
+            let mut current: Vec<Memory> = Vec::new();
+            for mem in group {
+                if let Some(prev) = current.last() {
+                    if mem.created_at - prev.created_at > gap {
+                        let first = current.first().unwrap();
+                        let last_mem = current.last().unwrap();
+                        sessions.push(SessionGroup {
+                            session_id: None,
+                            project_id: first.project_id.clone(),
+                            started_at: first.created_at.to_rfc3339(),
+                            ended_at: last_mem.created_at.to_rfc3339(),
+                            memories: std::mem::take(&mut current),
+                        });
+                    }
+                }
+                current.push(mem.clone());
+            }
+            if !current.is_empty() {
+                let first = current.first().unwrap();
+                let last_mem = current.last().unwrap();
+                sessions.push(SessionGroup {
+                    session_id: None,
+                    project_id: first.project_id.clone(),
+                    started_at: first.created_at.to_rfc3339(),
+                    ended_at: last_mem.created_at.to_rfc3339(),
+                    memories: current,
+                });
+            }
+        }
+
+        // Sort by started_at DESC.
+        sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+        let total = sessions.len() as i64;
+        let page = sessions.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    // -----------------------------------------------------------------------
     // Edges
     // -----------------------------------------------------------------------
 
@@ -713,6 +848,19 @@ impl Store {
 
         Ok(Stats { memory_count, edge_count, project_count, pending_jobs: job_count, by_type })
     }
+}
+
+// ---------------------------------------------------------------------------
+// SessionGroup
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionGroup {
+    pub session_id: Option<String>,
+    pub project_id: Option<String>,
+    pub started_at: String,
+    pub ended_at: String,
+    pub memories: Vec<Memory>,
 }
 
 // ---------------------------------------------------------------------------
@@ -978,5 +1126,116 @@ mod tests {
         store.create_memory("a", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
         let s = store.stats().unwrap();
         assert_eq!(s.memory_count, 1);
+    }
+
+    #[test]
+    fn list_sessions_groups_by_session_id_and_gap() {
+        let store = test_store();
+
+        // 3 memories with explicit session_id, 3 without (gap-split).
+        store.create_memory(
+            "a1", MemoryType::Fact, 0.5, Source::Cli, None,
+            Some(&serde_json::json!({ "session_id": "s1" })),
+        ).unwrap();
+        store.create_memory(
+            "a2", MemoryType::Fact, 0.5, Source::Cli, None,
+            Some(&serde_json::json!({ "session_id": "s1" })),
+        ).unwrap();
+        store.create_memory(
+            "a3", MemoryType::Fact, 0.5, Source::Cli, None,
+            Some(&serde_json::json!({ "session_id": "s2" })),
+        ).unwrap();
+
+        // Unkeyed rows — within gap (default 1800s) → same session.
+        store.create_memory("u1", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        store.create_memory("u2", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+
+        let (sessions, total) = store.list_sessions(None, 1800, 100, 0).unwrap();
+        assert_eq!(total, 3); // s1, s2, unkeyed group
+        // s1 has 2 memories
+        let s1 = sessions.iter().find(|s| s.session_id.as_deref() == Some("s1")).unwrap();
+        assert_eq!(s1.memories.len(), 2);
+        // s2 has 1 memory
+        let s2 = sessions.iter().find(|s| s.session_id.as_deref() == Some("s2")).unwrap();
+        assert_eq!(s2.memories.len(), 1);
+        // Unkeyed group has 2
+        let unkeyed = sessions.iter().find(|s| s.session_id.is_none()).unwrap();
+        assert_eq!(unkeyed.memories.len(), 2);
+    }
+
+    #[test]
+    fn list_sessions_legacy_extra_session_id() {
+        let store = test_store();
+        store.create_memory(
+            "legacy", MemoryType::Fact, 0.5, Source::Cli, None,
+            Some(&serde_json::json!({ "extra": { "session_id": "old-sid" } })),
+        ).unwrap();
+
+        let (sessions, total) = store.list_sessions(None, 1800, 100, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(sessions[0].session_id.as_deref(), Some("old-sid"));
+    }
+
+    #[test]
+    fn list_sessions_gap_split() {
+        let store = test_store();
+        // Create two unkeyed memories 2 hours apart.
+        let m1 = store.create_memory("old", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let m2 = store.create_memory("new", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+
+        let two_hours_ago = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        store.conn.execute(
+            "UPDATE memories SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![two_hours_ago, m1.id],
+        ).unwrap();
+
+        // With 30-min gap → two sessions.
+        let (sessions, total) = store.list_sessions(None, 1800, 100, 0).unwrap();
+        assert_eq!(total, 2);
+        assert!(sessions.iter().all(|s| s.session_id.is_none()));
+    }
+
+    #[test]
+    fn list_sessions_project_filter() {
+        let store = test_store();
+        let p = store.upsert_project("/p", "proj", None).unwrap();
+        store.create_memory(
+            "a", MemoryType::Fact, 0.5, Source::Cli, Some(&p.id),
+            Some(&serde_json::json!({ "session_id": "s1" })),
+        ).unwrap();
+        store.create_memory("b", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+
+        // Filter by project → only s1.
+        let (sessions, total) = store.list_sessions(Some(&p.id), 1800, 100, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(sessions[0].session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn list_sessions_ordering() {
+        let store = test_store();
+        // s2 created before s1 by backdating.
+        store.create_memory(
+            "new", MemoryType::Fact, 0.5, Source::Cli, None,
+            Some(&serde_json::json!({ "session_id": "s1" })),
+        ).unwrap();
+        store.create_memory(
+            "old", MemoryType::Fact, 0.5, Source::Cli, None,
+            Some(&serde_json::json!({ "session_id": "s2" })),
+        ).unwrap();
+
+        // Backdate s2's memory.
+        let two_days_ago = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+        let all = store.list_memories(None, None, 10, 0).unwrap().0;
+        let old_mem = all.iter().find(|m| m.content == "old").unwrap();
+        store.conn.execute(
+            "UPDATE memories SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![two_days_ago, old_mem.id],
+        ).unwrap();
+
+        let (sessions, _) = store.list_sessions(None, 1800, 100, 0).unwrap();
+        // Newest first → s1 before s2.
+        assert_eq!(sessions[0].session_id.as_deref(), Some("s1"));
+        assert_eq!(sessions[1].session_id.as_deref(), Some("s2"));
     }
 }

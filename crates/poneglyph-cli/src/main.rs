@@ -54,17 +54,17 @@ enum Command {
         #[arg(long, default_value = "json")]
         format: String,
     },
-    /// Seed a throwaway database with sample data and serve the viewer
+    /// Seed sample data into a database (no server; run `poneglyph serve` to view)
     Demo {
         /// Number of memories to seed
         #[arg(long, default_value = "60")]
         count: usize,
-        /// Seed into this DB instead of an ephemeral temp dir
+        /// Seed into this DB instead of the configured database
         #[arg(long)]
         db: Option<PathBuf>,
-        /// HTTP port (default from config: 3742)
+        /// Seed even if the target database already has memories
         #[arg(long)]
-        port: Option<u16>,
+        force: bool,
     },
     /// Show status
     Status,
@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
         }
         Command::Recall { query, limit } => cmd_recall(&config, &query, limit).await,
         Command::Forget { id } => cmd_forget(&config, &id),
-        Command::Demo { count, db, port } => cmd_demo(&config, count, db, port).await,
+        Command::Demo { count, db, force } => cmd_demo(&config, count, db, force).await,
         Command::Export { format } => cmd_export(&config, &format),
         Command::Status => cmd_status(&config),
     }
@@ -206,33 +206,28 @@ async fn cmd_serve(config: &Config) -> Result<()> {
     result
 }
 
-async fn cmd_demo(
-    config: &Config,
-    count: usize,
-    db: Option<PathBuf>,
-    port: Option<u16>,
-) -> Result<()> {
-    // Ephemeral by default: a showcase must not pollute the real store.
-    let (_tmp, db_path) = match db {
-        Some(path) => (None, path),
-        None => {
-            let tmp = tempfile::tempdir().context("failed to create temp dir")?;
-            let path = tmp.path().join("demo.db");
-            (Some(tmp), path)
-        }
+async fn cmd_demo(config: &Config, count: usize, db: Option<PathBuf>, force: bool) -> Result<()> {
+    let is_default_db = db.is_none();
+    let db_path = match db {
+        Some(path) => path,
+        None => config.db_path.clone(),
     };
 
-    let mut config = config.clone();
-    config.db_path = db_path;
-    config.server.mcp = false;
-    if let Some(p) = port {
-        config.server.http_port = p;
-    }
     config.ensure_dirs()?;
-    poneglyph_http::validate_security(&config)?;
 
-    let store = Store::open(&config.db_path).context("failed to open demo database")?;
-    let embedder = try_embedder(&config).await;
+    // Guard: refuse to seed a non-empty DB unless --force or --db given.
+    if db_path.exists() && !force && is_default_db {
+        let probe = Store::open(&db_path)?;
+        let existing = probe.stats()?.memory_count;
+        if existing > 0 {
+            anyhow::bail!(
+                "Database already has {existing} memories. Pass --force to re-seed or --db <path> to target a different database."
+            );
+        }
+    }
+
+    let store = Store::open(&db_path).context("failed to open database")?;
+    let embedder = try_embedder(config).await;
 
     println!("Seeding {count} demo memories…");
     let outcome = {
@@ -246,30 +241,19 @@ async fn cmd_demo(
             }
             None => None,
         };
-        // Seeding is sync + potentially embeds inline; fine for a one-shot demo.
         tokio::task::block_in_place(|| demo::seed(&store, count, &config.graph, embed))?
     };
+
     println!(
-        "Seeded {} memories, {} edges, {} projects.",
-        outcome.memories, outcome.edges, outcome.projects
+        "Seeded {} memories, {} edges, {} projects into {}.",
+        outcome.memories, outcome.edges, outcome.projects, db_path.display()
     );
 
-    let listener = poneglyph_http::bind(&config)
-        .await
-        .context("failed to bind HTTP server")?;
-    let url = format!("http://{}", listener.local_addr()?);
-    println!("Viewer: {url}  (Ctrl-C to stop; demo data is discarded unless --db was given)");
-
-    let state = poneglyph_http::AppState {
-        store: Arc::new(Mutex::new(store)),
-        embedder,
-        config: Arc::new(config),
-        enrich: None, // queue already drained inline
-    };
-    tokio::select! {
-        r = poneglyph_http::serve_on(listener, state) => r,
-        _ = tokio::signal::ctrl_c() => Ok(()),
+    if is_default_db {
+        println!("Run `poneglyph serve` to view the data.");
     }
+
+    Ok(())
 }
 
 async fn cmd_remember(

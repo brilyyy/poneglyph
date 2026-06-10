@@ -95,6 +95,11 @@ pub async fn ingest(
     if let Some(extra) = &ev.metadata {
         metadata["extra"] = extra.clone();
     }
+    // Canonical session key: hoist ev.metadata.session_id to top-level.
+    // Legacy extra.session_id is handled by the SQL query in list_sessions.
+    if let Some(sid) = ev.metadata.as_ref().and_then(|m| m.get("session_id")).and_then(Value::as_str) {
+        metadata["session_id"] = json!(sid);
+    }
 
     // Embed before taking the lock (no await under the mutex).
     let embedding = state.embed_or_none(&ev.content).await?;

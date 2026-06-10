@@ -258,6 +258,82 @@ pub async fn project_context(
 }
 
 // ---------------------------------------------------------------------------
+// /api/timeline
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct TimelineQuery {
+    pub project_path: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub gap_secs: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct TimelineSession {
+    pub session_id: Option<String>,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    pub started_at: String,
+    pub ended_at: String,
+    pub memory_count: usize,
+    pub memories: Vec<Memory>,
+}
+
+#[derive(Serialize)]
+pub struct TimelineResponse {
+    pub sessions: Vec<TimelineSession>,
+    pub total: i64,
+}
+
+pub async fn timeline(
+    State(state): State<AppState>,
+    Query(q): Query<TimelineQuery>,
+) -> ApiResult<TimelineResponse> {
+    let limit = q.limit.unwrap_or(20).clamp(1, 100);
+    let offset = q.offset.unwrap_or(0);
+    let gap_secs = q.gap_secs.unwrap_or(1800).clamp(60, 86400);
+
+    let store = state.lock_store()?;
+    let project_id = match q.project_path.as_deref() {
+        Some(path) => match project_id_for(&store, path)? {
+            Some(id) => Some(id),
+            None => return Ok(Json(TimelineResponse { sessions: vec![], total: 0 })),
+        },
+        None => None,
+    };
+
+    // Build project name map once.
+    let projects = store.list_projects()?;
+    let project_names: std::collections::HashMap<&str, &str> = projects
+        .iter()
+        .map(|p| (p.id.as_str(), p.name.as_str()))
+        .collect();
+
+    let (groups, total) = store.list_sessions(project_id.as_deref(), gap_secs, limit, offset)?;
+
+    let sessions = groups
+        .into_iter()
+        .map(|g| {
+            let memory_count = g.memories.len();
+            let project_name = g.project_id.as_deref()
+                .and_then(|pid| project_names.get(pid).map(|s| s.to_string()));
+            TimelineSession {
+                session_id: g.session_id,
+                project_id: g.project_id,
+                project_name,
+                started_at: g.started_at,
+                ended_at: g.ended_at,
+                memory_count,
+                memories: g.memories,
+            }
+        })
+        .collect();
+
+    Ok(Json(TimelineResponse { sessions, total }))
+}
+
+// ---------------------------------------------------------------------------
 // /api/projects, /api/stats
 // ---------------------------------------------------------------------------
 

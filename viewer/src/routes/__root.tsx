@@ -5,6 +5,7 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import {
   DashboardSquare01Icon,
   Database01Icon,
+  HistoryIcon,
   Moon01Icon,
   NeuralNetworkIcon,
   Search01Icon,
@@ -38,6 +39,7 @@ export const Route = createRootRoute({
 const NAV = [
   { to: '/', label: 'Dashboard', icon: DashboardSquare01Icon, exact: true },
   { to: '/memories', label: 'Memories', icon: Database01Icon, exact: false },
+  { to: '/timeline', label: 'Timeline', icon: HistoryIcon, exact: false },
   { to: '/search', label: 'Search', icon: Search01Icon, exact: false },
   { to: '/graph', label: 'Graph', icon: NeuralNetworkIcon, exact: false },
   { to: '/settings', label: 'Settings', icon: Settings01Icon, exact: false },

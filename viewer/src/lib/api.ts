@@ -5,6 +5,7 @@ import type {
   Project,
   SearchHit,
   Stats,
+  TimelineResponse,
 } from './types.ts'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -55,6 +56,13 @@ export const api = {
     request<GraphResponse>(`/api/graph${qs(params)}`),
 
   projects: () => request<{ projects: Project[] }>('/api/projects'),
+
+  timeline: (params: {
+    project_path?: string
+    limit?: number
+    offset?: number
+    gap_secs?: number
+  }) => request<TimelineResponse>(`/api/timeline${qs(params)}`),
 
   getSettings: () => request<Record<string, any>>('/api/settings'),
 

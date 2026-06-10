@@ -522,3 +522,81 @@ fn validate_security_rules() {
     config.server.bind_addr = "not-an-ip".into();
     assert!(validate_security(&config).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// /api/timeline
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn timeline_groups_sessions() {
+    let (state, store) = open_state();
+    {
+        let store = store.lock().unwrap();
+        store.create_memory(
+            "a", MemoryType::Fact, 0.5, Source::Cli, None,
+            Some(&json!({ "session_id": "sess-1" })),
+        ).unwrap();
+        store.create_memory(
+            "b", MemoryType::Fact, 0.5, Source::Cli, None,
+            Some(&json!({ "session_id": "sess-1" })),
+        ).unwrap();
+        store.create_memory(
+            "c", MemoryType::Fact, 0.5, Source::Cli, None,
+            Some(&json!({ "session_id": "sess-2" })),
+        ).unwrap();
+    }
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/timeline?limit=10")).await;
+    assert_eq!(status, StatusCode::OK);
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(body["total"], 2);
+    assert_eq!(sessions.len(), 2);
+    // Each session should have memories.
+    for s in sessions {
+        assert!(s["memory_count"].as_u64().unwrap() > 0);
+        assert!(s["memories"].as_array().unwrap().len() > 0);
+    }
+}
+
+#[tokio::test]
+async fn ingest_hoists_session_id_to_top_level() {
+    let (state, store) = open_state();
+    let router = build_router(state);
+
+    // Case 1: session_id in ev.metadata → hoisted to top-level metadata.session_id.
+    let event = json!({
+        "event": "tool_use",
+        "client": "claude-code",
+        "content": "test hoist",
+        "metadata": { "session_id": "hoisted-sid" }
+    });
+    let (status, body) = send(router.clone(), json_req("POST", "/ingest", event)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = body["id"].as_str().unwrap();
+
+    {
+        let store = store.lock().unwrap();
+        let mem = store.get_memory(id).unwrap().unwrap();
+        let meta = mem.metadata.unwrap();
+        // Top-level session_id should be present (hoisted).
+        assert_eq!(meta["session_id"], "hoisted-sid");
+        // extra still carries the original metadata.
+        assert_eq!(meta["extra"]["session_id"], "hoisted-sid");
+    }
+
+    // Case 2: second session — timeline should find both.
+    let event2 = json!({
+        "event": "tool_use",
+        "client": "claude-code",
+        "content": "second session",
+        "metadata": { "session_id": "other-sid" }
+    });
+    let (status, _) = send(router.clone(), json_req("POST", "/ingest", event2)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = send(router, get("/api/timeline?limit=100")).await;
+    assert_eq!(status, StatusCode::OK);
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2);
+}

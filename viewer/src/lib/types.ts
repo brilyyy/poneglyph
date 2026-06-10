@@ -97,3 +97,18 @@ export const TYPE_COLORS: Record<MemoryType, string> = {
   preference: '#f472b6', // pink-400
   code_context: '#94a3b8', // slate-400
 }
+
+export interface TimelineSession {
+  session_id: string | null
+  project_id: string | null
+  project_name: string | null
+  started_at: string
+  ended_at: string
+  memory_count: number
+  memories: Memory[]
+}
+
+export interface TimelineResponse {
+  sessions: TimelineSession[]
+  total: number
+}
