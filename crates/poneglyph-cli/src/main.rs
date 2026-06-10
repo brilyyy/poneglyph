@@ -286,16 +286,10 @@ async fn cmd_remember(
 
     let mem_type: MemoryType = memory_type.parse().unwrap_or(MemoryType::Semantic);
 
-    // Resolve project
-    let project_id = if let Some(path) = project {
-        let name = std::path::Path::new(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.to_string());
-        let p = store.upsert_project(path, &name, None)?;
-        Some(p.id)
-    } else {
-        None
+    // Resolve project (path → git-remote identity fallback).
+    let project_id = match project {
+        Some(path) => Some(poneglyph_core::project::detect_project(&store, path)?.id),
+        None => None,
     };
 
     let metadata = if !tags.is_empty() {

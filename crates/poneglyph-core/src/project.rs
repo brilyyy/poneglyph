@@ -1,10 +1,12 @@
 //! Project detection and context assembly.
 //!
-//! v1 (M2): detect by absolute path, assemble a ranked context string.
-//! Git-remote normalization for cross-clone identity lands in M6.
+//! Detection: path first; on a miss, the normalized git remote gives a
+//! stable identity across clones (PRD §8.10 AC2). The remote is read from
+//! `.git/config` directly — no subprocess.
 
 use anyhow::Result;
 use chrono::Utc;
+use std::path::Path;
 
 use crate::model::{Memory, Project};
 use crate::store::Store;
@@ -16,14 +18,109 @@ const CHARS_PER_TOKEN: usize = 4;
 /// How many candidate memories to score before truncating to the budget.
 const CANDIDATE_LIMIT: usize = 200;
 
-/// Resolve (upsert) a project from an absolute directory path.
-/// Name defaults to the final path component.
+/// Read the `origin` remote URL from `<path>/.git/config` without spawning
+/// a subprocess. When `.git` is a file (worktrees/submodules), follows the
+/// `gitdir:` pointer.
+fn read_git_remote(project_path: &Path) -> Option<String> {
+    let dot_git = project_path.join(".git");
+    let config_path = if dot_git.is_file() {
+        // "gitdir: /path/to/real/gitdir"
+        let pointer = std::fs::read_to_string(&dot_git).ok()?;
+        let gitdir = pointer.trim().strip_prefix("gitdir:")?.trim();
+        let gitdir = if Path::new(gitdir).is_absolute() {
+            std::path::PathBuf::from(gitdir)
+        } else {
+            project_path.join(gitdir)
+        };
+        gitdir.join("config")
+    } else {
+        dot_git.join("config")
+    };
+
+    let config = std::fs::read_to_string(config_path).ok()?;
+    let mut in_origin = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_origin = line == r#"[remote "origin"]"#;
+            continue;
+        }
+        if in_origin && let Some(url) = line.strip_prefix("url") {
+            let url = url.trim_start().strip_prefix('=')?.trim();
+            if !url.is_empty() {
+                return Some(url.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Normalize a git remote URL to a stable `host/org/repo` identity:
+/// `git@github.com:Org/Repo.git`, `https://u@github.com/org/repo.git/`,
+/// and `ssh://git@github.com/org/repo` all become `github.com/org/repo`.
+pub fn normalize_git_remote(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+
+    // Strip scheme.
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    // Strip user@.
+    let rest = rest.rsplit_once('@').map(|(_, r)| r).unwrap_or(rest);
+    // scp-style host:path → host/path (but not host:port/path).
+    let rest = match rest.split_once(':') {
+        Some((host, path)) if !path.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
+            format!("{host}/{path}")
+        }
+        Some((host, path)) => {
+            // host:port/path — drop the port.
+            let path = path.split_once('/').map(|(_, p)| p).unwrap_or("");
+            format!("{host}/{path}")
+        }
+        None => rest.to_string(),
+    };
+
+    let rest = rest.trim_end_matches('/').trim_end_matches(".git").trim_end_matches('/');
+    let (host, path) = rest.split_once('/')?;
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some(format!("{}/{}", host.to_lowercase(), path))
+}
+
+/// Resolve a project from an absolute directory path.
+/// Identity: path hit → that project (backfilling a missing git_remote);
+/// otherwise the normalized git remote — a clone at a new path resolves to
+/// the original project (PRD §8.10 AC2). New paths without a match upsert.
 pub fn detect_project(store: &Store, project_path: &str) -> Result<Project> {
-    let name = std::path::Path::new(project_path)
+    let remote = read_git_remote(Path::new(project_path))
+        .as_deref()
+        .and_then(normalize_git_remote);
+
+    if let Some(p) = store.get_project(project_path)? {
+        store.touch_project(&p.id)?;
+        if p.git_remote.is_none()
+            && let Some(r) = &remote
+        {
+            store.set_project_remote(&p.id, r)?;
+        }
+        return Ok(p);
+    }
+
+    if let Some(r) = &remote
+        && let Some(p) = store.get_project_by_remote(r)?
+    {
+        // Same repo cloned elsewhere: same project, original path kept.
+        store.touch_project(&p.id)?;
+        return Ok(p);
+    }
+
+    let name = Path::new(project_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| project_path.to_string());
-    store.upsert_project(project_path, &name, None)
+    store.upsert_project(project_path, &name, remote.as_deref())
 }
 
 /// Ranking score per PRD §8.10: importance × recency × access.
@@ -91,6 +188,82 @@ pub fn get_project_context(
 mod tests {
     use super::*;
     use crate::model::{MemoryType, Source};
+
+    #[test]
+    fn normalize_git_remote_forms() {
+        let cases = [
+            ("git@github.com:Acme/Repo.git", "github.com/Acme/Repo"),
+            ("https://github.com/acme/repo.git", "github.com/acme/repo"),
+            ("https://user@GitHub.com/acme/repo/", "github.com/acme/repo"),
+            ("ssh://git@github.com/acme/repo", "github.com/acme/repo"),
+            ("ssh://git@github.com:22/acme/repo.git", "github.com/acme/repo"),
+            ("git@gitlab.example.com:group/sub/repo.git", "gitlab.example.com/group/sub/repo"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(normalize_git_remote(input).as_deref(), Some(want), "input: {input}");
+        }
+        assert_eq!(normalize_git_remote(""), None);
+        assert_eq!(normalize_git_remote("nonsense"), None);
+    }
+
+    fn write_git_config(dir: &Path, url: &str) {
+        let git = dir.join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::write(
+            git.join("config"),
+            format!("[core]\n\tbare = false\n[remote \"origin\"]\n\turl = {url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn clone_at_new_path_resolves_to_same_project() {
+        let store = Store::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        let a = tmp.path().join("clone-a");
+        let b = tmp.path().join("clone-b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        write_git_config(&a, "git@github.com:acme/x.git");
+        write_git_config(&b, "https://github.com/acme/x.git");
+
+        let p1 = detect_project(&store, a.to_str().unwrap()).unwrap();
+        assert_eq!(p1.git_remote.as_deref(), Some("github.com/acme/x"));
+
+        // Different URL form, same normalized identity → same project,
+        // original path kept (PRD §8.10 AC2).
+        let p2 = detect_project(&store, b.to_str().unwrap()).unwrap();
+        assert_eq!(p2.id, p1.id);
+        assert_eq!(p2.path, p1.path);
+        assert_eq!(store.list_projects().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn no_git_dir_is_path_only_project() {
+        let store = Store::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let p = detect_project(&store, tmp.path().to_str().unwrap()).unwrap();
+        assert!(p.git_remote.is_none());
+    }
+
+    #[test]
+    fn path_hit_backfills_missing_remote() {
+        let store = Store::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // First seen without git.
+        let p1 = detect_project(&store, dir.to_str().unwrap()).unwrap();
+        assert!(p1.git_remote.is_none());
+
+        // Later it's a git checkout — remote backfilled on next detection.
+        write_git_config(&dir, "git@github.com:acme/y.git");
+        detect_project(&store, dir.to_str().unwrap()).unwrap();
+        let refreshed = store.get_project(dir.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(refreshed.git_remote.as_deref(), Some("github.com/acme/y"));
+    }
 
     #[test]
     fn unknown_project_yields_empty_context() {
