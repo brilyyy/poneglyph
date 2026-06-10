@@ -4337,13 +4337,16 @@ name = "poneglyph-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "figment",
  "poneglyph-core",
  "poneglyph-http",
  "poneglyph-mcp",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

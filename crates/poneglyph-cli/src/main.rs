@@ -1,3 +1,5 @@
+mod demo;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -52,6 +54,18 @@ enum Command {
         #[arg(long, default_value = "json")]
         format: String,
     },
+    /// Seed a throwaway database with sample data and serve the viewer
+    Demo {
+        /// Number of memories to seed
+        #[arg(long, default_value = "60")]
+        count: usize,
+        /// Seed into this DB instead of an ephemeral temp dir
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// HTTP port (default from config: 3742)
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Show status
     Status,
 }
@@ -82,6 +96,7 @@ async fn main() -> Result<()> {
         }
         Command::Recall { query, limit } => cmd_recall(&config, &query, limit).await,
         Command::Forget { id } => cmd_forget(&config, &id),
+        Command::Demo { count, db, port } => cmd_demo(&config, count, db, port).await,
         Command::Export { format } => cmd_export(&config, &format),
         Command::Status => cmd_status(&config),
     }
@@ -182,6 +197,72 @@ async fn cmd_serve(config: &Config) -> Result<()> {
 
     worker.abort(); // clients gone; no more producers
     result
+}
+
+async fn cmd_demo(
+    config: &Config,
+    count: usize,
+    db: Option<PathBuf>,
+    port: Option<u16>,
+) -> Result<()> {
+    // Ephemeral by default: a showcase must not pollute the real store.
+    let (_tmp, db_path) = match db {
+        Some(path) => (None, path),
+        None => {
+            let tmp = tempfile::tempdir().context("failed to create temp dir")?;
+            let path = tmp.path().join("demo.db");
+            (Some(tmp), path)
+        }
+    };
+
+    let mut config = config.clone();
+    config.db_path = db_path;
+    config.server.mcp = false;
+    if let Some(p) = port {
+        config.server.http_port = p;
+    }
+    config.ensure_dirs()?;
+    poneglyph_http::validate_security(&config)?;
+
+    let store = Store::open(&config.db_path).context("failed to open demo database")?;
+    let embedder = try_embedder(&config).await;
+
+    println!("Seeding {count} demo memories…");
+    let outcome = {
+        let mut embed_fn;
+        let embed: Option<&mut dyn FnMut(&str) -> Result<Vec<f32>>> = match &embedder {
+            Some(e) => {
+                let e = Arc::clone(e);
+                let rt = tokio::runtime::Handle::current();
+                embed_fn = move |text: &str| rt.block_on(e.embed_text(text));
+                Some(&mut embed_fn)
+            }
+            None => None,
+        };
+        // Seeding is sync + potentially embeds inline; fine for a one-shot demo.
+        tokio::task::block_in_place(|| demo::seed(&store, count, &config.graph, embed))?
+    };
+    println!(
+        "Seeded {} memories, {} edges, {} projects.",
+        outcome.memories, outcome.edges, outcome.projects
+    );
+
+    let listener = poneglyph_http::bind(&config)
+        .await
+        .context("failed to bind HTTP server")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    println!("Viewer: {url}  (Ctrl-C to stop; demo data is discarded unless --db was given)");
+
+    let state = poneglyph_http::AppState {
+        store: Arc::new(Mutex::new(store)),
+        embedder,
+        config: Arc::new(config),
+        enrich: None, // queue already drained inline
+    };
+    tokio::select! {
+        r = poneglyph_http::serve_on(listener, state) => r,
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    }
 }
 
 async fn cmd_remember(
