@@ -253,8 +253,16 @@ impl PoneglyphMcp {
             }
 
             // Edge computation is queued, never run here (§8.4).
-            // llm_assist additionally enqueues LLM jobs starting in M6.
             enrich::enqueue_compute_edges(&store, &mem.id).map_err(internal)?;
+
+            // llm_assist enqueues enrichment, it does not run it (§9). Gated
+            // on config so a disabled install never even creates LLM jobs.
+            if req.llm_assist.unwrap_or(false)
+                && self.config.enrichment.enabled
+                && self.config.llm.enabled
+            {
+                enrich::enqueue_llm_jobs(&store, &mem.id).map_err(internal)?;
+            }
 
             mem.id
         };

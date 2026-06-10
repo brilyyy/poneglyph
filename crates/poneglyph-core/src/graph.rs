@@ -224,6 +224,36 @@ pub fn build_tag_overlap_edges(store: &Store, memory_id: &str) -> Result<usize> 
     Ok(created)
 }
 
+/// Top-k nearest neighbours of a memory by embedding (excluding itself).
+/// Empty when the memory has no embedding (FTS-only mode).
+pub fn nearest_neighbors(store: &Store, memory_id: &str, k: usize) -> Result<Vec<crate::model::Memory>> {
+    let Some(target) = get_embedding(store, memory_id)? else {
+        return Ok(Vec::new());
+    };
+
+    let target_bytes: Vec<u8> = target.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let mut stmt = store.conn.prepare(
+        "SELECT memory_id FROM vec_memories WHERE embedding MATCH ?1 AND k = ?2",
+    )?;
+    let candidates: Vec<String> = stmt
+        .query_map(params![target_bytes, (k + 1) as i64], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let mut out = Vec::with_capacity(k);
+    for cand in candidates {
+        if cand == memory_id {
+            continue;
+        }
+        if let Some(m) = store.get_memory(&cand)? {
+            out.push(m);
+        }
+        if out.len() == k {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 /// Run every no-LLM builder for one memory. Used by the enrichment worker.
 pub fn build_edges_for_memory(store: &Store, cfg: &GraphConfig, memory_id: &str) -> Result<usize> {
     let mut n = 0;

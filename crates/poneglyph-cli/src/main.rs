@@ -146,9 +146,16 @@ async fn cmd_serve(config: &Config) -> Result<()> {
     let embedder = try_embedder(config).await;
     let shared_config = Arc::new(config.clone());
 
-    // Background edge worker on its own connection (WAL).
-    let (enrich, worker) =
-        poneglyph_core::enrich::spawn_worker(config.db_path.clone(), config.graph.clone());
+    // Background worker on its own connection (WAL): edges always, LLM
+    // enrichment only when enabled in config.
+    let (enrich, worker) = poneglyph_core::enrich::spawn_worker(
+        config.db_path.clone(),
+        poneglyph_core::enrich::WorkerConfig {
+            graph: config.graph.clone(),
+            llm: config.llm.clone(),
+            enrichment: config.enrichment.clone(),
+        },
+    );
 
     // Bind HTTP up front so AddrInUse can degrade instead of killing MCP:
     // a second editor spawning `poneglyph serve` shares the other instance's

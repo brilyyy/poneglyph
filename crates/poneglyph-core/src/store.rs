@@ -213,6 +213,40 @@ impl Store {
         }
     }
 
+    /// Stable identity across clones (PRD §8.10 AC2).
+    pub fn get_project_by_remote(&self, git_remote: &str) -> Result<Option<Project>> {
+        let result = self.conn.query_row(
+            "SELECT id, path, git_remote, name, created_at, last_seen_at FROM projects WHERE git_remote = ?1",
+            params![git_remote],
+            |row| row_to_project(row),
+        );
+        match result {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Bump `last_seen_at` without touching path/name/remote.
+    pub fn touch_project(&self, id: &str) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE projects SET last_seen_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Backfill `git_remote` when it was NULL (path-only project later opened
+    /// in a git checkout).
+    pub fn set_project_remote(&self, id: &str, git_remote: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE projects SET git_remote = ?1 WHERE id = ?2 AND git_remote IS NULL",
+            params![git_remote, id],
+        )?;
+        Ok(())
+    }
+
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, path, git_remote, name, created_at, last_seen_at FROM projects ORDER BY last_seen_at DESC",
@@ -319,6 +353,65 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?;
 
         Ok((memories, total))
+    }
+
+    /// Shallow-merge a JSON object into `metadata` (NULL → `{}`); arrays
+    /// under `tags`/`entities` are union-deduped so enrichment never clobbers
+    /// caller-provided tags. Bumps `updated_at`.
+    pub fn merge_metadata(&self, id: &str, patch: &serde_json::Value) -> Result<bool> {
+        let Some(patch_obj) = patch.as_object() else {
+            anyhow::bail!("metadata patch must be a JSON object");
+        };
+
+        let current: Option<Option<String>> = self
+            .conn
+            .query_row("SELECT metadata FROM memories WHERE id = ?1", params![id], |r| r.get(0))
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        let Some(current) = current else { return Ok(false) };
+
+        let mut merged: serde_json::Value = current
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let obj = merged.as_object_mut().expect("metadata root is an object");
+
+        for (key, val) in patch_obj {
+            let is_union_key = key == "tags" || key == "entities";
+            match (is_union_key, obj.get(key).and_then(|v| v.as_array()), val.as_array()) {
+                (true, Some(existing), Some(incoming)) => {
+                    let mut union = existing.clone();
+                    for item in incoming {
+                        if !union.contains(item) {
+                            union.push(item.clone());
+                        }
+                    }
+                    obj.insert(key.clone(), serde_json::Value::Array(union));
+                }
+                _ => {
+                    obj.insert(key.clone(), val.clone());
+                }
+            }
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE memories SET metadata = ?1, updated_at = ?2 WHERE id = ?3",
+            params![serde_json::to_string(&merged)?, now, id],
+        )?;
+        Ok(true)
+    }
+
+    /// Set importance (clamped 0..=1), bump `updated_at`.
+    pub fn set_importance(&self, id: &str, importance: f64) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            "UPDATE memories SET importance = ?1, updated_at = ?2 WHERE id = ?3",
+            params![importance.clamp(0.0, 1.0), now, id],
+        )?;
+        Ok(updated > 0)
     }
 
     pub fn update_memory(&self, id: &str, new_content: &str) -> Result<bool> {
@@ -580,10 +673,24 @@ impl Store {
         Ok(jobs)
     }
 
+    /// Claim a job: status → running, attempts += 1. The only place attempts
+    /// are counted, so attempts == number of executions started.
+    pub fn mark_job_running(&self, id: &str) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Transition a job without touching `attempts`. Setting back to
+    /// `pending` with an error is the retry path; `updated_at` doubles as
+    /// the retry/backoff timestamp.
     pub fn update_job_status(&self, id: &str, status: JobStatus, error: Option<&str>) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
-            "UPDATE jobs SET status = ?1, last_error = ?2, updated_at = ?3, attempts = attempts + 1 WHERE id = ?4",
+            "UPDATE jobs SET status = ?1, last_error = ?2, updated_at = ?3 WHERE id = ?4",
             params![status.to_string(), error, now, id],
         )?;
         Ok(())

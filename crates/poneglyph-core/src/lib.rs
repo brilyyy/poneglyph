@@ -6,3 +6,4 @@ pub mod retrieve;
 pub mod graph;
 pub mod enrich;
 pub mod project;
+pub mod llm;

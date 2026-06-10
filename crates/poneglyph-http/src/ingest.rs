@@ -122,6 +122,11 @@ pub async fn ingest(
         }
         enrich::enqueue_compute_edges(&store, &mem.id)?;
 
+        // Passive capture is high-volume; only summarize is worth LLM time.
+        if state.config.enrichment.enabled && state.config.llm.enabled {
+            store.create_job(poneglyph_core::model::JobType::Summarize, &mem.id)?;
+        }
+
         mem.id
     };
 
