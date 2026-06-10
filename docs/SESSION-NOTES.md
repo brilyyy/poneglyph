@@ -1,81 +1,92 @@
-# Session Notes — 2026-06-10 (M4 + M5 implemented)
+# Session Notes — 2026-06-10 (XDG paths, demo, context injection, M6, shadcn viewer)
 
-State after this session: **M0–M5 complete** (minus M0 CI workflow and the
-M2 manual Claude Code/Desktop round-trip verify). `cargo test --workspace` →
-49 passed, 2 ignored; +3 viewer asset tests behind `--features embed-viewer`
-(18 total in poneglyph-http). Smoke-tested end-to-end: hook script →
-`/ingest` → passive memory tagged tool+project → searchable; embedded viewer
-serves with SPA fallback; `/api/graph` returns a 500-node sample + expansion
-against a 520-memory seeded DB.
+State after this session: **M0–M6 complete** (remaining: M0 CI workflow, M2
+manual Claude Code/Desktop verify, M7). `cargo test --workspace` → 69 passed,
+2 ignored; +3 viewer tests behind `--features embed-viewer`. Viewer builds
+clean (`pnpm build` + `tsc --noEmit`).
 
-Commits this session: `2808c89` (M4) → `be93d6b` (M5) → `f0169dd` (init fix).
+Commits: `f2ce21d` (XDG paths) → `08141a9` (demo) → `3ecd80a` (/api/context +
+SessionStart hook) → `8c93496` (M6 LLM enrichment) → `2f846c0` (M6 git-remote
+identity) → `862727a` (shadcn viewer + UX).
 
 ## What was built
 
-### M4 — HTTP + ingest + hooks
-- `poneglyph-http` fully implemented: `state.rs` (AppState mirrors the MCP
-  pattern — `Arc<Mutex<Store>>`, embed before lock, notify after unlock),
-  `error.rs` (`ApiError` → `{"error": msg}` + `ApiJson` extractor so even
-  serde rejections keep that shape), `auth.rs`, `api.rs`, `ingest.rs`,
-  `viewer.rs`, router in `lib.rs`.
-- Routes: `/api/{memories,search,graph,projects,stats,settings}`, `/ingest`,
-  `/healthz` (open), `/` fallback (open). axum 0.8 — `{id}` param syntax.
-- `Store::graph_neighborhood` (iterative BFS, undirected, node cap, drops
-  boundary edges) + `Store::graph_sample` (recent N + edges with both
-  endpoints in sample) in core, with unit tests. IN-lists chunked at 900.
-- Ingest mapping: tool_use/file_edit/terminal → `code_context`,
-  user/assistant_message → `episodic`; source=passive, importance=0.3;
-  metadata `{tags: [client, tool?], event, client, tool?, timestamp, extra}`.
-  Empty content 400, >100KB 413. No server-side dedupe (hook's job).
-- Security (§12, stricter than spec): token enforced whenever set, not just
-  non-loopback; `validate_security` refuses non-loopback bind without token;
-  GET /api/settings strips secrets (adds `api_token_set`/`api_key_set`);
-  PATCH /api/settings whitelist-merges into config.toml and returns
-  `restart_required: true` (no hot reload — runtime `Arc<Config>` untouched).
-- `cmd_serve`: binds HTTP **before** the select; `AddrInUse` + mcp=true →
-  warn + MCP-only (second editor instance survives); `server.mcp=false` →
-  HTTP-only daemon until Ctrl-C. MCP stdin close kills the whole process.
-- `hooks/claude-code/`: posttooluse.sh + userpromptsubmit.sh (jq transform,
-  curl -m 2, always exit 0, skip read-only tools, 4000-char truncate) +
-  settings.json.example + README. `hooks/opencode/poneglyph.ts` plugin
-  (`tool.execute.after`, swallowed errors — API names unverified, SHOULD).
+### XDG default paths
+- config `~/.config/poneglyph/config.toml`, db `~/.local/share/poneglyph/`,
+  models `~/.cache/poneglyph/models` (PRD §8.14/§6.1). Windows keeps
+  ProjectDirs. `xdg_dir_from` is env-injectable for tests.
+- **Legacy fallback is read-only**: old macOS location used in place with a
+  warn + `mv` hint (also in `poneglyph status`); never auto-moved (WAL
+  sidecars). Explicit config paths unaffected. This machine still runs from
+  the legacy dir — move it when convenient.
 
-### M5 — Viewer
-- `viewer/`: **TanStack Router + Vite SPA, not TanStack Start** (deviation
-  from PRD §13 letter: Start is SSR-first, dead weight under rust-embed).
-  Tailwind v4, react-query, hand-rolled UI primitives in
-  `src/components/ui.tsx` (shadcn CLI refused non-interactive init; not
-  worth fighting). Scaffolded with create-tsrouter-app file-router template.
-- Pages: Dashboard, Memories (filters+pagination, URL search params),
-  Memory detail (edit/delete, metadata, edges), Search, Graph explorer,
-  Settings (whitelisted fields + restart banner).
-- Graph explorer: `@xyflow/react` + **static d3-force layout** (300 sync
-  ticks, positions reused across expansions so layout stays incremental);
-  click node → fetch depth-1 → Map-merge; edge-type checkboxes; node colors
-  by memory_type (`TYPE_COLORS` in lib/types.ts).
-- Embedding: cargo feature `embed-viewer` on poneglyph-http (CLI re-exports
-  as `viewer`), **default off** — plain `cargo build` serves a placeholder
-  page, zero Node required. `scripts/build-release.sh` = pnpm build + cargo
-  `--features viewer`. SPA fallback: extension-less paths → index.html;
-  hashed `/assets/*` get immutable cache headers.
+### `poneglyph demo`
+- Seeds ~20 templates cycled to `--count` (default 60): 3 fake projects, all
+  6 types, tags, 2 near-dup pairs, backdated 30 days in temporal clusters
+  (raw SQL, demo-only), inline edge drain, hand-seeded explicit + labeled
+  relation edges. **Ephemeral TempDir DB by default**; `--db`/`--port` flags.
+  Serves HTTP-only with the embedded viewer.
 
-## Decisions / gotchas
-- Dev loop: `poneglyph serve` (mcp=false) + `pnpm -C viewer dev` (vite
-  proxies /api + /ingest to 3742).
-- A release built without `--features viewer` silently ships the placeholder
-  — build-release.sh is the only documented release path (M7 checklist item).
-- `viewer/src/routeTree.gen.ts` is generated but committed (template default).
-- Fixed M0-era bug: `poneglyph init` ENOENT'd when the platform config dir
-  didn't exist (now create_dir_all's it).
-- Stale-binary trap: first smoke test ran a pre-M4 `target/debug/poneglyph`;
-  `cargo test` alone doesn't rebuild the bin you run manually.
+### Zero-token session context injection
+- `GET /api/context?project_path=&max_tokens=` wraps
+  `project::get_project_context` (behind bearer auth).
+- `hooks/claude-code/sessionstart.sh`: SessionStart stdout → injected
+  context. Budget `PONEGLYPH_CONTEXT_TOKENS` (default 600; config 2000 stays
+  for the MCP tool). Zero LLM calls; silent exit 0 when server down.
 
-## Not done / next (M6)
-- M2 manual verify: `claude mcp add poneglyph -- poneglyph serve` round-trip
-  + Claude Desktop; now also verify hooks end-to-end in a real session.
-- M0 leftover: CI workflow (build + test both feature configs; release job
-  runs build-release.sh).
-- M6: core::enrich LLM client (async-openai), 4 job types, retry/backoff,
-  git-remote project identity, get_project_context token budget already
-  exists (M2) — needs git-remote normalization.
-- opencode plugin untested against a real opencode install.
+### M6 — enrichment
+- `core::llm`: async-openai vs configurable endpoint. `from_config` → None
+  unless enabled+endpoint+model; worker constructs it only when
+  `enrichment.enabled` (AC1 — disabled ⇒ client never exists).
+- Handlers: summarize→metadata.summary (skip <280 chars);
+  extract_entities→entities+tags union → re-enqueue compute_edges;
+  extract_relations→relation edges grounded to top-5 embedding neighbours,
+  LLM picks by index (no dangling nodes); score_importance→importance.
+- Worker: plain async task **owning** Store, `&mut Store` through the async
+  chain (Store is Send not Sync; `&mut T` is Send — `&T` isn't). No more
+  spawn_blocking shuttle.
+- Retry: attempts bumped only by `mark_job_running`; failure → pending with
+  updated_at as retry stamp; due-filter in Rust (10s·2^attempts); failed at
+  3. Sync CLI drain skips LLM jobs (leaves pending for serve worker).
+- Wiring: MCP remember `llm_assist` + both config gates → 4 jobs; /ingest →
+  summarize only (passive volume). Tests vs in-process axum mock (real wire
+  path) incl. garbage-reply retry-to-failed and unreachable-endpoint
+  failure injection.
+
+### M6 — git-remote identity
+- `read_git_remote` parses `.git/config` directly (follows `gitdir:`
+  pointers); `normalize_git_remote` → `host/org/repo` (ssh/scp/https/user@/
+  port/.git forms). detect_project: path hit (backfills NULL remote) →
+  remote hit (same project, **original path kept**, AC2) → new upsert.
+  CLI remember now uses detect_project.
+
+### Viewer — shadcn + UX
+- User had run `shadcn init` (style radix-luma, hugeicons, `#/` aliases);
+  this session added ~20 components and migrated everything; `ui.tsx`
+  deleted; `@/*` alias dropped from tsconfig. TypeBadge wraps shadcn Badge.
+- UX: icon-collapsible Sidebar + live stats footer + dark-mode toggle
+  (localStorage + pre-paint script in index.html); sonner toasts;
+  AlertDialog delete; Table memories list, relative timestamps
+  (`formatRelative`); debounced search-as-you-type (`keepPreviousData`);
+  graph MiniMap + colorMode + selected-node card; Field/Switch settings;
+  dashboard type-breakdown bars. `/api/stats` gained `by_type` (GROUP BY).
+
+## Gotchas
+- Generated shadcn `spinner.tsx` conflicts with HugeiconsIcon strokeWidth
+  typing — fixed with `Omit<ComponentProps<"svg">, "strokeWidth">`. May
+  recur if the component is re-generated with `--overwrite`.
+- `XDG paths commit (f2ce21d) accidentally also picked up the user's
+  untracked shadcn init files — intentional content, early landing.
+- hugeicons names verified against dist/types/index.d.ts (5473 icons);
+  NeuralNetworkIcon = graph nav icon.
+- Demo with model available takes ~20 s to embed 30+ seeds before the
+  server binds — don't curl too early.
+
+## Not done / next
+- M0: CI workflow (test default + `--features embed-viewer`; release job
+  runs scripts/build-release.sh).
+- M2 manual verify: Claude Code + Desktop MCP round-trip; hooks end-to-end
+  in a real session (incl. new sessionstart.sh).
+- Live LLM check vs Ollama (mock-tested only).
+- M7 hardening: perf bench at 100k, retrieval eval, migration docs,
+  release binaries, INSTALL/INTEGRATIONS docs.
