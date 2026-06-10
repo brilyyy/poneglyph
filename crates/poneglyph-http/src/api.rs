@@ -230,6 +230,34 @@ pub async fn graph(
 }
 
 // ---------------------------------------------------------------------------
+// /api/context — zero-LLM session context injection (PRD §8.10)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ContextQuery {
+    pub project_path: String,
+    pub max_tokens: Option<usize>,
+}
+
+pub async fn project_context(
+    State(state): State<AppState>,
+    Query(q): Query<ContextQuery>,
+) -> ApiResult<Value> {
+    if q.project_path.trim().is_empty() {
+        return Err(ApiError::bad_request("project_path must be non-empty"));
+    }
+    let max_tokens = q
+        .max_tokens
+        .unwrap_or(state.config.context.max_tokens)
+        .clamp(1, 32_000);
+
+    let store = state.lock_store()?;
+    let (context, memory_count) =
+        poneglyph_core::project::get_project_context(&store, &q.project_path, max_tokens)?;
+    Ok(Json(json!({ "context": context, "memory_count": memory_count })))
+}
+
+// ---------------------------------------------------------------------------
 // /api/projects, /api/stats
 // ---------------------------------------------------------------------------
 

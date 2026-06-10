@@ -13,7 +13,7 @@ events to passive memories.
 
 ```sh
 mkdir -p ~/.config/poneglyph/hooks
-cp posttooluse.sh userpromptsubmit.sh ~/.config/poneglyph/hooks/
+cp posttooluse.sh userpromptsubmit.sh sessionstart.sh ~/.config/poneglyph/hooks/
 chmod +x ~/.config/poneglyph/hooks/*.sh
 ```
 
@@ -27,6 +27,14 @@ captured; the scripts additionally skip read-only tools as a backstop.
 |---|---|---|
 | `PONEGLYPH_PORT` | `3742` | HTTP port of `poneglyph serve` |
 | `PONEGLYPH_TOKEN` | unset | Bearer token, required if `server.api_token` is set |
+| `PONEGLYPH_CONTEXT_TOKENS` | `600` | Token budget for SessionStart context injection |
+
+## Session context injection (sessionstart.sh)
+
+On every session start, the project's most relevant memories (ranked by
+importance × recency × access) are injected as context — capped at
+`PONEGLYPH_CONTEXT_TOKENS`, computed entirely locally, **zero LLM calls**.
+Unknown projects inject nothing.
 
 ## Behavior guarantees
 

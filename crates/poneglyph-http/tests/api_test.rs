@@ -328,6 +328,48 @@ async fn graph_focus_neighborhood_and_global_sample() {
 }
 
 // ---------------------------------------------------------------------------
+// /api/context
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn context_returns_ranked_project_memories_under_budget() {
+    let (state, store) = open_state();
+    {
+        let store = store.lock().unwrap();
+        let p = store.upsert_project("/home/u/proj", "proj", None).unwrap();
+        store
+            .create_memory("critical architecture decision", MemoryType::Semantic, 0.9, Source::Cli, Some(&p.id), None)
+            .unwrap();
+        store
+            .create_memory("minor note", MemoryType::Fact, 0.1, Source::Cli, Some(&p.id), None)
+            .unwrap();
+    }
+    let router = build_router(state);
+
+    let (status, body) = send(
+        router.clone(),
+        get("/api/context?project_path=%2Fhome%2Fu%2Fproj&max_tokens=600"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ctx = body["context"].as_str().unwrap();
+    assert!(ctx.contains("critical architecture decision"));
+    assert_eq!(body["memory_count"], 2);
+    // 600 tokens ≈ 2400 chars budget.
+    assert!(ctx.len() <= 600 * 4 + 100);
+
+    // Unknown project ⇒ empty context, not an error.
+    let (status, body) = send(router.clone(), get("/api/context?project_path=%2Fnope")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["context"], "");
+    assert_eq!(body["memory_count"], 0);
+
+    // Missing project_path ⇒ 4xx.
+    let (status, _) = send(router, get("/api/context")).await;
+    assert!(status.is_client_error());
+}
+
+// ---------------------------------------------------------------------------
 // /api/stats, /api/projects, /api/settings
 // ---------------------------------------------------------------------------
 
