@@ -14,7 +14,7 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 - [x] 4 crates scaffolded (poneglyph-{core,mcp,http,cli}) + module stubs
 - [x] .gitignore
 - [x] Delete stale top-level src/main.rs
-- [>] Implement core::model
+- [x] Implement core::model
 - [x] Implement core::config
 - [x] Implement core::store + migration runner
 - [x] Implement `poneglyph init` CLI command
