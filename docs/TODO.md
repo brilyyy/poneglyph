@@ -67,7 +67,7 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 - [x] http::ingest POST /ingest (event schema §10.2 → passive code_context memory + enqueue edges)
 - [x] Bind 127.0.0.1 default; token gate when non-loopback (refuse start without token)
 - [x] poneglyph serve runs MCP + HTTP concurrently
-- [x] hooks/claude-code/ PostToolUse + optional UserPromptSubmit curl-to-/ingest scripts
+- [x] hooks/claude-code/ PostToolUse + UserPromptSubmit + Stop + SessionStart hooks
 - [x] hooks/opencode/ plugin (SHOULD, non-blocking)
 - [x] Integration test: hook POST → stored memory tagged tool+project
 
@@ -102,8 +102,8 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 
 - [ ] Perf pass: seed 100k synthetic memories; bench §11 targets (criterion); CI regression guard
 - [ ] Retrieval-quality eval harness: labeled corpus → recall@10 in CI
-- [ ] Failure injection tests: unreachable LLM, corrupt job rows, missing model cache → graceful
-- [ ] Migration v0→v1 path documented + tested
+- [x] Failure injection tests: unreachable LLM, corrupt job rows, missing model cache → graceful
+- [x] Migration v0→v1 path documented + tested
 - [ ] Cross-platform release binaries: macOS arm64 + Linux x86_64
-- [ ] Docs: INSTALL.md, INTEGRATIONS.md (Claude Code + Desktop), README quickstart
-- [ ] Verify fully offline after first-run model download
+- [x] Docs: INSTALL.md, INTEGRATIONS.md (Claude Code + Desktop), README quickstart
+- [x] Verify fully offline after first-run model download
