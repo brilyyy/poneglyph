@@ -93,6 +93,9 @@ fn cmd_init(config: &Config) -> Result<()> {
     // Create default config if it doesn't exist
     let config_path = Config::default_config_path();
     if !config_path.exists() {
+        if let Some(dir) = config_path.parent() {
+            std::fs::create_dir_all(dir).context("failed to create config directory")?;
+        }
         let toml = toml::to_string_pretty(config).unwrap_or_default();
         std::fs::write(&config_path, toml).context("failed to write config")?;
         println!("Config created: {}", config_path.display());
