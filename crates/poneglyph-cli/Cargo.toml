@@ -7,6 +7,10 @@ edition.workspace = true
 name = "poneglyph"
 path = "src/main.rs"
 
+[features]
+# Compile the built web viewer into the binary (see scripts/build-release.sh).
+viewer = ["poneglyph-http/embed-viewer"]
+
 [dependencies]
 poneglyph-core = { workspace = true }
 poneglyph-mcp  = { workspace = true }
@@ -19,4 +23,4 @@ tracing-subscriber = { workspace = true }
 anyhow         = { workspace = true }
 serde_json     = { workspace = true }
 serde          = { workspace = true }
-toml           = "0.8"
+toml           = { workspace = true }

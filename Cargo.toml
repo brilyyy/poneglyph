@@ -67,6 +67,11 @@ clap = { version = "4", features = ["derive", "env"] }
 # Config
 figment     = { version = "0.10", features = ["toml", "env"] }
 directories = { version = "5" }
+toml        = { version = "0.8" }
+
+# HTTP test plumbing
+http-body-util = { version = "0.1" }
+mime_guess     = { version = "2" }
 
 # UUID / time
 uuid   = { version = "1",   features = ["v7"] }

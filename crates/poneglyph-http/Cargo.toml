@@ -3,6 +3,11 @@ name    = "poneglyph-http"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Compile the built viewer (viewer/dist) into the binary. Off by default so
+# `cargo build` never requires Node; release builds use scripts/build-release.sh.
+embed-viewer = []
+
 [dependencies]
 poneglyph-core = { workspace = true }
 axum           = { workspace = true }
@@ -12,5 +17,12 @@ rust-embed     = { workspace = true }
 tokio          = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
+toml           = { workspace = true }
+mime_guess     = { workspace = true }
 anyhow         = { workspace = true }
 tracing        = { workspace = true }
+chrono         = { workspace = true }
+
+[dev-dependencies]
+tower          = { workspace = true, features = ["util"] }
+http-body-util = { workspace = true }

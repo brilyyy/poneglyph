@@ -121,25 +121,63 @@ async fn try_embedder(config: &Config) -> Option<Arc<Embedder>> {
 
 async fn cmd_serve(config: &Config) -> Result<()> {
     config.ensure_dirs()?;
+    poneglyph_http::validate_security(config)?;
+
     let store = Store::open(&config.db_path).context("failed to open database")?;
     let store = Arc::new(Mutex::new(store));
     let embedder = try_embedder(config).await;
+    let shared_config = Arc::new(config.clone());
 
     // Background edge worker on its own connection (WAL).
     let (enrich, worker) =
         poneglyph_core::enrich::spawn_worker(config.db_path.clone(), config.graph.clone());
 
-    // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
-    // HTTP server joins this select in Phase M4.
-    let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(
-        Arc::clone(&store),
-        embedder,
-        Arc::new(config.clone()),
-    )
-    .with_enrich(enrich);
+    // Bind HTTP up front so AddrInUse can degrade instead of killing MCP:
+    // a second editor spawning `poneglyph serve` shares the other instance's
+    // HTTP server (same DB) and runs MCP-only here.
+    let listener = match poneglyph_http::bind(config).await {
+        Ok(l) => Some(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && config.server.mcp => {
+            tracing::warn!(
+                port = config.server.http_port,
+                "HTTP port busy — another poneglyph instance is serving HTTP; continuing MCP-only"
+            );
+            None
+        }
+        Err(e) => return Err(e).context("failed to bind HTTP server"),
+    };
 
-    let result = poneglyph_mcp::server::run_stdio(mcp).await;
-    worker.abort(); // MCP client gone; no more producers
+    let http_state = poneglyph_http::AppState {
+        store: Arc::clone(&store),
+        embedder: embedder.clone(),
+        config: Arc::clone(&shared_config),
+        enrich: Some(enrich.clone()),
+    };
+    let http = async move {
+        match listener {
+            Some(l) => poneglyph_http::serve_on(l, http_state).await,
+            None => std::future::pending().await,
+        }
+    };
+
+    // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
+    let result = if config.server.mcp {
+        let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store, embedder, shared_config)
+            .with_enrich(enrich);
+        tokio::select! {
+            // MCP client disconnect owns the process lifetime.
+            r = poneglyph_mcp::server::run_stdio(mcp) => r,
+            r = http => r,
+        }
+    } else {
+        // HTTP-only daemon mode (server.mcp = false): run until Ctrl-C.
+        tokio::select! {
+            r = http => r,
+            _ = tokio::signal::ctrl_c() => Ok(()),
+        }
+    };
+
+    worker.abort(); // clients gone; no more producers
     result
 }
 

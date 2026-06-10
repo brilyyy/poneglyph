@@ -8,6 +8,9 @@ use crate::model::*;
 
 pub const SCHEMA_VERSION: i64 = 1;
 
+/// Max ids per SQL `IN (...)` list — stays under SQLite's default 999-param limit.
+const SQL_IN_CHUNK: usize = 900;
+
 // ---------------------------------------------------------------------------
 // Extension loading — call once per process, before any Connection
 // ---------------------------------------------------------------------------
@@ -423,6 +426,124 @@ impl Store {
         Ok(edges)
     }
 
+    /// Iterative BFS from `focus` up to `depth` hops, capped at `max_nodes`
+    /// total nodes. Returns the visited memories plus the edges among them.
+    /// Edges are traversed in both directions (graph is undirected for
+    /// exploration purposes).
+    pub fn graph_neighborhood(
+        &self,
+        focus: &str,
+        depth: u32,
+        max_nodes: usize,
+    ) -> Result<(Vec<Memory>, Vec<Edge>)> {
+        use std::collections::HashSet;
+
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(focus.to_string());
+        let mut frontier: Vec<String> = vec![focus.to_string()];
+        let mut edges: Vec<Edge> = Vec::new();
+        let mut edge_ids: HashSet<String> = HashSet::new();
+
+        let mut hop = 0;
+        while hop < depth && !frontier.is_empty() && visited.len() < max_nodes {
+            let mut next: Vec<String> = Vec::new();
+            for chunk in frontier.chunks(SQL_IN_CHUNK) {
+                let ph: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+                let ph = ph.join(", ");
+                let sql = format!(
+                    "SELECT id, src_id, dst_id, edge_type, label, weight, created_at
+                     FROM edges WHERE src_id IN ({ph}) OR dst_id IN ({ph})"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    chunk.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+                let found: Vec<Edge> = stmt
+                    .query_map(params_refs.as_slice(), |row| row_to_edge(row))?
+                    .collect::<rusqlite::Result<_>>()?;
+
+                for edge in found {
+                    if !edge_ids.insert(edge.id.clone()) {
+                        continue;
+                    }
+                    for nid in [&edge.src_id, &edge.dst_id] {
+                        if !visited.contains(nid.as_str()) && visited.len() < max_nodes {
+                            visited.insert(nid.clone());
+                            next.push(nid.clone());
+                        }
+                    }
+                    edges.push(edge);
+                }
+            }
+            frontier = next;
+            hop += 1;
+        }
+
+        // Drop edges that reach past the node cap / depth boundary.
+        edges.retain(|e| visited.contains(&e.src_id) && visited.contains(&e.dst_id));
+
+        let ids: Vec<String> = visited.into_iter().collect();
+        let nodes = self.memories_by_ids(&ids)?;
+        Ok((nodes, edges))
+    }
+
+    /// Global graph sample for the initial explorer load: the `max_nodes`
+    /// most recent memories plus all edges with both endpoints in the sample.
+    pub fn graph_sample(&self, max_nodes: usize) -> Result<(Vec<Memory>, Vec<Edge>)> {
+        use std::collections::HashSet;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count
+             FROM memories ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let nodes: Vec<Memory> = stmt
+            .query_map(params![max_nodes as i64], |row| row_to_memory(row))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let ids: HashSet<&str> = nodes.iter().map(|m| m.id.as_str()).collect();
+        let id_vec: Vec<String> = nodes.iter().map(|m| m.id.clone()).collect();
+
+        let mut edges: Vec<Edge> = Vec::new();
+        for chunk in id_vec.chunks(SQL_IN_CHUNK) {
+            let ph: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+            let sql = format!(
+                "SELECT id, src_id, dst_id, edge_type, label, weight, created_at
+                 FROM edges WHERE src_id IN ({})",
+                ph.join(", ")
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let found = stmt
+                .query_map(params_refs.as_slice(), |row| row_to_edge(row))?
+                .collect::<rusqlite::Result<Vec<Edge>>>()?;
+            edges.extend(found.into_iter().filter(|e| ids.contains(e.dst_id.as_str())));
+        }
+
+        Ok((nodes, edges))
+    }
+
+    /// Fetch memories by id (order unspecified). Chunks the IN list to stay
+    /// under SQLite's parameter limit.
+    fn memories_by_ids(&self, ids: &[String]) -> Result<Vec<Memory>> {
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(SQL_IN_CHUNK) {
+            let ph: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+            let sql = format!(
+                "SELECT id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count
+                 FROM memories WHERE id IN ({})",
+                ph.join(", ")
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let found: Vec<Memory> = stmt
+                .query_map(params_refs.as_slice(), |row| row_to_memory(row))?
+                .collect::<rusqlite::Result<_>>()?;
+            out.extend(found);
+        }
+        Ok(out)
+    }
+
     // -----------------------------------------------------------------------
     // Jobs
     // -----------------------------------------------------------------------
@@ -679,6 +800,61 @@ mod tests {
         let store = test_store();
         // Running migrate again should not fail
         store.conn.execute("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '1')", []).unwrap();
+    }
+
+    #[test]
+    fn graph_neighborhood_bfs() {
+        let store = test_store();
+        // Chain: a — b — c — d
+        let a = store.create_memory("a", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let b = store.create_memory("b", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let c = store.create_memory("c", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let d = store.create_memory("d", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        store.create_edge(&a.id, &b.id, EdgeType::Similarity, None, 0.9).unwrap();
+        store.create_edge(&b.id, &c.id, EdgeType::Similarity, None, 0.9).unwrap();
+        store.create_edge(&c.id, &d.id, EdgeType::Similarity, None, 0.9).unwrap();
+
+        // depth=1 from b: {a, b, c}, 2 edges
+        let (nodes, edges) = store.graph_neighborhood(&b.id, 1, 500).unwrap();
+        let ids: Vec<&str> = nodes.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(nodes.len(), 3);
+        assert!(ids.contains(&a.id.as_str()) && ids.contains(&b.id.as_str()) && ids.contains(&c.id.as_str()));
+        assert_eq!(edges.len(), 2);
+
+        // depth=2 from b: all 4 nodes, 3 edges
+        let (nodes, edges) = store.graph_neighborhood(&b.id, 2, 500).unwrap();
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(edges.len(), 3);
+
+        // max_nodes cap
+        let (nodes, edges) = store.graph_neighborhood(&b.id, 2, 2).unwrap();
+        assert_eq!(nodes.len(), 2);
+        // Only edges with both endpoints inside the cap survive.
+        for e in &edges {
+            assert!(nodes.iter().any(|n| n.id == e.src_id));
+            assert!(nodes.iter().any(|n| n.id == e.dst_id));
+        }
+    }
+
+    #[test]
+    fn graph_sample_excludes_dangling_edges() {
+        let store = test_store();
+        let a = store.create_memory("a", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let b = store.create_memory("b", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let c = store.create_memory("c", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        store.create_edge(&a.id, &b.id, EdgeType::Similarity, None, 0.9).unwrap();
+        store.create_edge(&b.id, &c.id, EdgeType::Temporal, None, 1.0).unwrap();
+
+        let (nodes, edges) = store.graph_sample(500).unwrap();
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(edges.len(), 2);
+
+        // Sample of 2 most-recent (b, c): only the b—c edge has both endpoints.
+        let (nodes, edges) = store.graph_sample(2).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].src_id, b.id);
+        assert_eq!(edges[0].dst_id, c.id);
     }
 
     #[test]

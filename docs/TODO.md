@@ -63,13 +63,13 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 
 > Exit: passive capture from Claude Code hook works (§8.7, §8.9).
 
-- [ ] http::api axum router (/api/memories CRUD+filter, /api/search, /api/graph, /api/projects, /api/settings, /api/stats)
-- [ ] http::ingest POST /ingest (event schema §10.2 → passive code_context memory + enqueue edges)
-- [ ] Bind 127.0.0.1 default; token gate when non-loopback (refuse start without token)
-- [ ] poneglyph serve runs MCP + HTTP concurrently
-- [ ] hooks/claude-code/ PostToolUse + optional UserPromptSubmit curl-to-/ingest scripts
-- [ ] hooks/opencode/ plugin (SHOULD, non-blocking)
-- [ ] Integration test: hook POST → stored memory tagged tool+project
+- [x] http::api axum router (/api/memories CRUD+filter, /api/search, /api/graph, /api/projects, /api/settings, /api/stats)
+- [x] http::ingest POST /ingest (event schema §10.2 → passive code_context memory + enqueue edges)
+- [x] Bind 127.0.0.1 default; token gate when non-loopback (refuse start without token)
+- [x] poneglyph serve runs MCP + HTTP concurrently
+- [x] hooks/claude-code/ PostToolUse + optional UserPromptSubmit curl-to-/ingest scripts
+- [x] hooks/opencode/ plugin (SHOULD, non-blocking)
+- [x] Integration test: hook POST → stored memory tagged tool+project
 
 ---
 
