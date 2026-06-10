@@ -326,6 +326,13 @@ fn cmd_status(config: &Config) -> Result<()> {
     println!("Pending jobs:{}", stats.pending_jobs);
     println!("Enrichment:  {}", if config.llm.enabled { "on" } else { "off" });
 
+    if Config::using_legacy_paths() {
+        println!();
+        println!("Note: data lives at a legacy (pre-XDG) location.");
+        println!("Move it with poneglyph stopped, e.g.:");
+        println!("  mv ~/Library/'Application Support'/poneglyph/poneglyph.db ~/.local/share/poneglyph/");
+    }
+
     Ok(())
 }
 

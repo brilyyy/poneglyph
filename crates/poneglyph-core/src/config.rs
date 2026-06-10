@@ -113,36 +113,119 @@ pub struct Config {
     pub enrichment: EnrichmentConfig,
 }
 
+// ---------------------------------------------------------------------------
+// Path resolution — XDG on unix (PRD §6.1, §8.14), ProjectDirs on Windows.
+// Legacy installs (pre-XDG, e.g. ~/Library/Application Support/poneglyph on
+// macOS) are read in place when the new path is empty; never auto-moved
+// (WAL sidecars / possibly-live serve make moves unsafe).
+// ---------------------------------------------------------------------------
+
+fn home_dir() -> PathBuf {
+    directories::BaseDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// XDG base-dir resolution with injectable env value (testable without
+/// mutating process env). Relative env values are ignored per the XDG spec.
+fn xdg_dir_from(env_val: Option<std::ffi::OsString>, home: &std::path::Path, suffix: &str) -> PathBuf {
+    env_val
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(suffix))
+        .join("poneglyph")
+}
+
+#[cfg(unix)]
+fn xdg_dir(env_var: &str, home_suffix: &str) -> PathBuf {
+    xdg_dir_from(std::env::var_os(env_var), &home_dir(), home_suffix)
+}
+
+/// Legacy (pre-XDG) data dir, used only as a read fallback.
+fn legacy_data_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "poneglyph").map(|d| d.data_dir().to_path_buf())
+}
+
+fn legacy_config_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "poneglyph").map(|d| d.config_dir().to_path_buf())
+}
+
+/// Prefer `new`; fall back to `legacy` when only the legacy artifact exists.
+fn resolve_with_legacy(new: PathBuf, legacy: Option<PathBuf>) -> PathBuf {
+    match legacy {
+        Some(l) if !new.exists() && l.exists() && l != new => {
+            tracing::warn!(
+                legacy = %l.display(),
+                new = %new.display(),
+                "using legacy location — move it to the new path to silence this \
+                 (stop poneglyph first, then mv the file/dir)"
+            );
+            l
+        }
+        _ => new,
+    }
+}
+
 impl Config {
     pub fn data_dir() -> PathBuf {
-        directories::ProjectDirs::from("", "", "poneglyph")
+        #[cfg(unix)]
+        return xdg_dir("XDG_DATA_HOME", ".local/share");
+        #[cfg(not(unix))]
+        return directories::ProjectDirs::from("", "", "poneglyph")
             .map(|dirs| dirs.data_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(|| PathBuf::from("."));
     }
 
     pub fn config_dir() -> PathBuf {
-        directories::ProjectDirs::from("", "", "poneglyph")
+        #[cfg(unix)]
+        return xdg_dir("XDG_CONFIG_HOME", ".config");
+        #[cfg(not(unix))]
+        return directories::ProjectDirs::from("", "", "poneglyph")
             .map(|dirs| dirs.config_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(|| PathBuf::from("."));
+    }
+
+    pub fn cache_dir() -> PathBuf {
+        #[cfg(unix)]
+        return xdg_dir("XDG_CACHE_HOME", ".cache");
+        #[cfg(not(unix))]
+        return directories::ProjectDirs::from("", "", "poneglyph")
+            .map(|dirs| dirs.cache_dir().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
     }
 
     pub fn default_config_path() -> PathBuf {
-        Self::config_dir().join("config.toml")
+        resolve_with_legacy(
+            Self::config_dir().join("config.toml"),
+            legacy_config_dir().map(|d| d.join("config.toml")),
+        )
     }
 
     pub fn default_db_path() -> PathBuf {
-        Self::data_dir().join(DB_FILE)
+        resolve_with_legacy(
+            Self::data_dir().join(DB_FILE),
+            legacy_data_dir().map(|d| d.join(DB_FILE)),
+        )
     }
 
     pub fn default_model_cache_dir() -> PathBuf {
-        Self::data_dir().join(MODEL_CACHE_DIR)
+        resolve_with_legacy(
+            Self::cache_dir().join(MODEL_CACHE_DIR),
+            legacy_data_dir().map(|d| d.join(MODEL_CACHE_DIR)),
+        )
+    }
+
+    /// True when any default path resolved to a legacy location (status hint).
+    pub fn using_legacy_paths() -> bool {
+        let xdg_db = Self::data_dir().join(DB_FILE);
+        let xdg_cfg = Self::config_dir().join("config.toml");
+        Self::default_db_path() != xdg_db || Self::default_config_path() != xdg_cfg
     }
 
     pub fn default() -> Self {
-        let data = Self::data_dir();
         Self {
-            db_path: data.join(DB_FILE),
-            model_cache_dir: data.join(MODEL_CACHE_DIR),
+            db_path: Self::default_db_path(),
+            model_cache_dir: Self::default_model_cache_dir(),
             embedding: EmbeddingConfig::default(),
             server: ServerConfig::default(),
             llm: LlmConfig::default(),
@@ -221,6 +304,46 @@ mod tests {
         assert_eq!(cfg.embedding.model_id, "custom/model");
         // Non-overridden defaults remain
         assert_eq!(cfg.graph.similarity_threshold, 0.82);
+    }
+
+    #[test]
+    fn xdg_dir_from_resolution() {
+        let home = std::path::Path::new("/home/u");
+
+        // Env set + absolute → used.
+        let p = xdg_dir_from(Some("/custom/data".into()), home, ".local/share");
+        assert_eq!(p, PathBuf::from("/custom/data/poneglyph"));
+
+        // Env unset → home + suffix.
+        let p = xdg_dir_from(None, home, ".config");
+        assert_eq!(p, PathBuf::from("/home/u/.config/poneglyph"));
+
+        // Relative env value ignored per XDG spec.
+        let p = xdg_dir_from(Some("relative/path".into()), home, ".cache");
+        assert_eq!(p, PathBuf::from("/home/u/.cache/poneglyph"));
+    }
+
+    #[test]
+    fn resolve_with_legacy_cases() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("new/poneglyph.db");
+        let legacy = dir.path().join("legacy/poneglyph.db");
+
+        // Both missing → new.
+        assert_eq!(resolve_with_legacy(new.clone(), Some(legacy.clone())), new);
+
+        // Legacy only → legacy.
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"x").unwrap();
+        assert_eq!(resolve_with_legacy(new.clone(), Some(legacy.clone())), legacy);
+
+        // Both present → new wins.
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        std::fs::write(&new, b"x").unwrap();
+        assert_eq!(resolve_with_legacy(new.clone(), Some(legacy)), new);
+
+        // No legacy candidate → new.
+        assert_eq!(resolve_with_legacy(new.clone(), None), new);
     }
 
     #[test]
