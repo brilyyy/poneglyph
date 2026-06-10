@@ -5,7 +5,7 @@ import type {
   Project,
   SearchHit,
   Stats,
-} from './types'
+} from './types.ts'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, init)
@@ -76,6 +76,21 @@ export function formatDate(iso: string | null): string {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+
+/** "2 hours ago" style for recent timestamps, absolute date past ~30 days. */
+export function formatRelative(iso: string | null): string {
+  if (!iso) return '—'
+  const then = new Date(iso).getTime()
+  const secs = Math.round((then - Date.now()) / 1000)
+  const abs = Math.abs(secs)
+  if (abs < 60) return rtf.format(secs, 'second')
+  if (abs < 3600) return rtf.format(Math.round(secs / 60), 'minute')
+  if (abs < 86400) return rtf.format(Math.round(secs / 3600), 'hour')
+  if (abs < 30 * 86400) return rtf.format(Math.round(secs / 86400), 'day')
+  return formatDate(iso)
 }
 
 export function truncate(s: string, max = 120): string {

@@ -1,9 +1,17 @@
 import { useEffect, useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 
-import { api } from '@/lib/api'
-import { Button, Card, CardHeader, ErrorNote, Input, Spinner } from '@/components/ui'
+import { api } from '#/lib/api.ts'
+import { Alert, AlertDescription } from '#/components/ui/alert.tsx'
+import { Button } from '#/components/ui/button.tsx'
+import { Card, CardContent, CardHeader, CardTitle } from '#/components/ui/card.tsx'
+import { Field, FieldDescription, FieldLabel } from '#/components/ui/field.tsx'
+import { Input } from '#/components/ui/input.tsx'
+import { Label } from '#/components/ui/label.tsx'
+import { Spinner } from '#/components/ui/spinner.tsx'
+import { Switch } from '#/components/ui/switch.tsx'
 
 export const Route = createFileRoute('/settings')({ component: SettingsPage })
 
@@ -12,7 +20,7 @@ function SettingsPage() {
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
   const [restartRequired, setRestartRequired] = useState(false)
 
-  // Editable (server-side whitelist mirrors this).
+  // Editable fields (server-side whitelist mirrors this).
   const [form, setForm] = useState({
     similarity_threshold: '',
     temporal_window_secs: '',
@@ -54,12 +62,24 @@ function SettingsPage() {
       }),
     onSuccess: (resp) => {
       setRestartRequired(resp.restart_required)
+      toast.success('Settings saved to config.toml')
       queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
+    onError: (e) => toast.error(`Save failed: ${e.message}`),
   })
 
-  if (settings.isLoading) return <Spinner />
-  if (settings.error) return <ErrorNote error={settings.error} />
+  if (settings.isLoading)
+    return (
+      <div className="flex justify-center p-12">
+        <Spinner />
+      </div>
+    )
+  if (settings.error)
+    return (
+      <Alert variant="destructive">
+        <AlertDescription>{String(settings.error)}</AlertDescription>
+      </Alert>
+    )
   const s = settings.data!
 
   return (
@@ -67,93 +87,129 @@ function SettingsPage() {
       <h1 className="text-2xl font-bold">Settings</h1>
 
       {restartRequired && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-          Settings saved to config.toml — restart <code>poneglyph serve</code> to apply.
-        </div>
+        <Alert>
+          <AlertDescription>
+            Settings saved — restart <code>poneglyph serve</code> to apply.
+          </AlertDescription>
+        </Alert>
       )}
 
       <Card>
-        <CardHeader title="Runtime (read-only)" />
-        <dl className="space-y-2 p-4 text-sm">
-          <Row k="db_path" v={<code className="text-xs">{String(s.db_path)}</code>} />
-          <Row k="model" v={<code className="text-xs">{String(s.embedding?.model_id)}</code>} />
-          <Row
-            k="server"
-            v={`${s.server?.bind_addr}:${s.server?.http_port} (token ${s.server?.api_token_set ? 'set' : 'not set'})`}
-          />
-        </dl>
+        <CardHeader>
+          <CardTitle>Runtime (read-only)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <dl className="space-y-2 text-sm">
+            <Row k="db_path" v={<code className="text-xs">{String(s.db_path)}</code>} />
+            <Row k="model" v={<code className="text-xs">{String(s.embedding?.model_id)}</code>} />
+            <Row
+              k="server"
+              v={`${s.server?.bind_addr}:${s.server?.http_port} (token ${s.server?.api_token_set ? 'set' : 'not set'})`}
+            />
+          </dl>
+        </CardContent>
       </Card>
 
       <Card>
-        <CardHeader title="Graph" />
-        <div className="space-y-3 p-4">
-          <Field label="similarity threshold (0–1)">
+        <CardHeader>
+          <CardTitle>Graph</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Field>
+            <FieldLabel htmlFor="sim-threshold">Similarity threshold</FieldLabel>
             <Input
+              id="sim-threshold"
               value={form.similarity_threshold}
               onChange={(e) => setForm({ ...form, similarity_threshold: e.target.value })}
             />
+            <FieldDescription>
+              Cosine similarity (0–1) above which a similarity edge is created.
+            </FieldDescription>
           </Field>
-          <Field label="temporal window (seconds)">
+          <Field>
+            <FieldLabel htmlFor="temporal-window">Temporal window (seconds)</FieldLabel>
             <Input
+              id="temporal-window"
               value={form.temporal_window_secs}
               onChange={(e) => setForm({ ...form, temporal_window_secs: e.target.value })}
             />
+            <FieldDescription>
+              Same-project memories created within this window get a temporal edge.
+            </FieldDescription>
           </Field>
-        </div>
+        </CardContent>
       </Card>
 
       <Card>
-        <CardHeader title="Context injection" />
-        <div className="p-4">
-          <Field label="max tokens">
+        <CardHeader>
+          <CardTitle>Context injection</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Field>
+            <FieldLabel htmlFor="max-tokens">Max tokens</FieldLabel>
             <Input
+              id="max-tokens"
               value={form.max_tokens}
               onChange={(e) => setForm({ ...form, max_tokens: e.target.value })}
             />
+            <FieldDescription>
+              Default budget for get_project_context (the SessionStart hook has its own, smaller
+              default).
+            </FieldDescription>
           </Field>
-        </div>
+        </CardContent>
       </Card>
 
       <Card>
-        <CardHeader title="LLM enrichment (optional, off by default)" />
-        <div className="space-y-3 p-4">
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
+        <CardHeader>
+          <CardTitle>LLM enrichment</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between">
+            <Label htmlFor="enrichment-enabled" className="text-sm">
+              Enrichment enabled
+            </Label>
+            <Switch
+              id="enrichment-enabled"
               checked={form.enrichment_enabled}
-              onChange={(e) => setForm({ ...form, enrichment_enabled: e.target.checked })}
+              onCheckedChange={(v) => setForm({ ...form, enrichment_enabled: v })}
             />
-            enrichment enabled
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
+          </div>
+          <div className="flex items-center justify-between">
+            <Label htmlFor="llm-enabled" className="text-sm">
+              LLM client enabled
+            </Label>
+            <Switch
+              id="llm-enabled"
               checked={form.llm_enabled}
-              onChange={(e) => setForm({ ...form, llm_enabled: e.target.checked })}
+              onCheckedChange={(v) => setForm({ ...form, llm_enabled: v })}
             />
-            LLM client enabled
-          </label>
-          <Field label="endpoint (OpenAI-compatible)">
+          </div>
+          <Field>
+            <FieldLabel htmlFor="llm-endpoint">Endpoint (OpenAI-compatible)</FieldLabel>
             <Input
+              id="llm-endpoint"
               placeholder="http://localhost:11434/v1"
               value={form.llm_endpoint}
               onChange={(e) => setForm({ ...form, llm_endpoint: e.target.value })}
             />
           </Field>
-          <Field label="model">
+          <Field>
+            <FieldLabel htmlFor="llm-model">Model</FieldLabel>
             <Input
+              id="llm-model"
               placeholder="llama3.2"
               value={form.llm_model}
               onChange={(e) => setForm({ ...form, llm_model: e.target.value })}
             />
           </Field>
-          <p className="text-xs text-zinc-400">
-            API keys and tokens can only be set in config.toml, never over HTTP.
+          <p className="text-xs text-muted-foreground">
+            Off by default — zero LLM calls unless both switches are on. API keys and tokens can
+            only be set in config.toml, never over HTTP.
           </p>
-        </div>
+        </CardContent>
       </Card>
 
-      {save.error && <ErrorNote error={save.error} />}
       <Button onClick={() => save.mutate()} disabled={save.isPending}>
         {save.isPending ? 'Saving…' : 'Save settings'}
       </Button>
@@ -164,17 +220,8 @@ function SettingsPage() {
 function Row({ k, v }: { k: string; v: React.ReactNode }) {
   return (
     <div className="flex gap-2">
-      <dt className="w-24 shrink-0 text-zinc-400">{k}</dt>
+      <dt className="w-24 shrink-0 text-muted-foreground">{k}</dt>
       <dd className="min-w-0">{v}</dd>
     </div>
-  )
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block text-sm">
-      <span className="mb-1 block text-xs font-medium text-zinc-500">{label}</span>
-      {children}
-    </label>
   )
 }

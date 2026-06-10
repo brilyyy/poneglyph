@@ -705,7 +705,13 @@ impl Store {
         let edge_count: i64 = self.conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
         let project_count: i64 = self.conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))?;
         let job_count: i64 = self.conn.query_row("SELECT COUNT(*) FROM jobs WHERE status = 'pending'", [], |r| r.get(0))?;
-        Ok(Stats { memory_count, edge_count, project_count, pending_jobs: job_count })
+
+        let mut stmt = self.conn.prepare("SELECT memory_type, COUNT(*) FROM memories GROUP BY memory_type")?;
+        let by_type: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        Ok(Stats { memory_count, edge_count, project_count, pending_jobs: job_count, by_type })
     }
 }
 
@@ -719,6 +725,8 @@ pub struct Stats {
     pub edge_count: i64,
     pub project_count: i64,
     pub pending_jobs: i64,
+    /// (memory_type, count) pairs for the dashboard breakdown.
+    pub by_type: Vec<(String, i64)>,
 }
 
 // ---------------------------------------------------------------------------

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { createFileRoute } from '@tanstack/react-router'
+import { Link, createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
   Background,
   Controls,
+  MiniMap,
   ReactFlow,
   type Edge as FlowEdge,
   type Node as FlowNode,
@@ -18,7 +19,8 @@ import {
   type SimulationNodeDatum,
 } from 'd3-force'
 
-import { api, truncate } from '@/lib/api'
+import { api, formatRelative, truncate } from '#/lib/api.ts'
+import { getTheme } from '#/lib/theme.ts'
 import {
   EDGE_TYPES,
   TYPE_COLORS,
@@ -26,8 +28,12 @@ import {
   type EdgeType,
   type Memory,
   type MemoryType,
-} from '@/lib/types'
-import { ErrorNote, Spinner } from '@/components/ui'
+} from '#/lib/types.ts'
+import { TypeBadge } from '#/components/type-badge.tsx'
+import { Alert, AlertDescription } from '#/components/ui/alert.tsx'
+import { Button } from '#/components/ui/button.tsx'
+import { Card, CardContent } from '#/components/ui/card.tsx'
+import { Spinner } from '#/components/ui/spinner.tsx'
 
 type GraphSearch = { focus?: string }
 
@@ -51,7 +57,7 @@ function layout(
 ): Map<string, { x: number; y: number }> {
   const simNodes: SimNode[] = memories.map((m) => {
     const p = prior.get(m.id)
-    return { id: m.id, x: p?.x, y: p?.y, fx: undefined, fy: undefined }
+    return { id: m.id, x: p?.x, y: p?.y }
   })
   const simLinks = edges.map((e) => ({ source: e.src_id, target: e.dst_id }))
 
@@ -157,20 +163,34 @@ function GraphPage() {
       target: e.dst_id,
       hidden: hidden.has(e.edge_type),
       label: e.edge_type === 'relation' ? (e.label ?? undefined) : undefined,
-      style: { strokeWidth: Math.max(1, e.weight * 2), stroke: '#cbd5e1' },
+      style: { strokeWidth: Math.max(1, e.weight * 2) },
     }))
 
     return { nodes: flowNodes, edges: flowEdges }
   }, [memoryArr, edgeArr, hidden])
 
-  if (initial.isLoading) return <Spinner />
-  if (initial.error) return <ErrorNote error={initial.error} />
+  if (initial.isLoading)
+    return (
+      <div className="flex justify-center p-12">
+        <Spinner />
+      </div>
+    )
+  if (initial.error)
+    return (
+      <Alert variant="destructive">
+        <AlertDescription>{String(initial.error)}</AlertDescription>
+      </Alert>
+    )
+
+  const selectedEdgeCount = selected
+    ? edgeArr.filter((e) => e.src_id === selected.id || e.dst_id === selected.id).length
+    : 0
 
   return (
     <div className="flex h-[calc(100vh-3rem)] flex-col gap-3">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Graph explorer</h1>
-        <span className="text-sm text-zinc-400">
+        <span className="text-sm text-muted-foreground">
           {memoryArr.length} nodes · {edgeArr.length} edges · click a node to expand
         </span>
       </div>
@@ -178,17 +198,24 @@ function GraphPage() {
       <div className="flex flex-wrap items-center gap-4 text-xs">
         <div className="flex items-center gap-2">
           {(Object.keys(TYPE_COLORS) as MemoryType[]).map((t) => (
-            <span key={t} className="flex items-center gap-1 text-zinc-500">
-              <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: TYPE_COLORS[t] }} />
+            <span key={t} className="flex items-center gap-1 text-muted-foreground">
+              <span
+                className="h-2.5 w-2.5 rounded-full"
+                style={{ backgroundColor: TYPE_COLORS[t] }}
+              />
               {t}
             </span>
           ))}
         </div>
-        <div className="flex items-center gap-2 border-l border-zinc-200 pl-4">
+        <div className="flex items-center gap-2 border-l border-border pl-4">
           {EDGE_TYPES.map((t) => (
-            <label key={t} className="flex cursor-pointer items-center gap-1 text-zinc-500">
+            <label
+              key={t}
+              className="flex cursor-pointer items-center gap-1 text-muted-foreground"
+            >
               <input
                 type="checkbox"
+                className="accent-primary"
                 checked={!hidden.has(t)}
                 onChange={() =>
                   setHidden((prev) => {
@@ -205,7 +232,7 @@ function GraphPage() {
         </div>
       </div>
 
-      <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-zinc-200 bg-white">
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-card">
         <ReactFlow
           nodes={flow.nodes}
           edges={flow.edges}
@@ -213,42 +240,53 @@ function GraphPage() {
           minZoom={0.05}
           onlyRenderVisibleElements
           nodesConnectable={false}
+          colorMode={getTheme()}
           onNodeClick={(_, node) => {
             setSelected(memories.get(node.id) ?? null)
             expand(node.id)
           }}
+          onPaneClick={() => setSelected(null)}
         >
           <Background />
           <Controls />
+          <MiniMap
+            pannable
+            zoomable
+            nodeColor={(n) =>
+              TYPE_COLORS[(memories.get(n.id)?.memory_type ?? 'code_context') as MemoryType]
+            }
+          />
         </ReactFlow>
 
         {selected && (
-          <div className="absolute right-3 top-3 w-72 rounded-xl border border-zinc-200 bg-white p-4 shadow-lg">
-            <div className="mb-2 flex items-center justify-between">
-              <span
-                className="rounded-full px-2 py-0.5 text-xs font-medium"
-                style={{
-                  backgroundColor: `${TYPE_COLORS[selected.memory_type]}22`,
-                  color: TYPE_COLORS[selected.memory_type],
-                }}
-              >
-                {selected.memory_type}
-              </span>
-              <button
-                className="text-zinc-400 hover:text-zinc-700"
-                onClick={() => setSelected(null)}
-              >
-                ✕
-              </button>
-            </div>
-            <p className="max-h-40 overflow-auto text-sm">{selected.content}</p>
-            <a
-              href={`/memories/${selected.id}`}
-              className="mt-2 inline-block text-xs font-medium text-blue-600 hover:underline"
-            >
-              open detail →
-            </a>
-          </div>
+          <Card className="absolute right-3 top-3 w-72 shadow-lg">
+            <CardContent className="space-y-2">
+              <div className="flex items-center justify-between">
+                <TypeBadge type={selected.memory_type} />
+                <button
+                  className="text-muted-foreground hover:text-foreground"
+                  onClick={() => setSelected(null)}
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="max-h-40 overflow-auto text-sm">{selected.content}</p>
+              <p className="text-xs text-muted-foreground">
+                {formatRelative(selected.created_at)} · importance{' '}
+                {selected.importance.toFixed(2)} · {selectedEdgeCount} edges
+              </p>
+              <div className="flex gap-2">
+                <Button asChild size="sm" variant="outline">
+                  <Link to="/memories/$id" params={{ id: selected.id }}>
+                    open detail
+                  </Link>
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => expand(selected.id)}>
+                  expand neighbors
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         )}
       </div>
     </div>

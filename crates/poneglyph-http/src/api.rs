@@ -270,11 +270,14 @@ pub async fn list_projects(State(state): State<AppState>) -> ApiResult<Value> {
 pub async fn stats(State(state): State<AppState>) -> ApiResult<Value> {
     let store = state.lock_store()?;
     let s = store.stats()?;
+    let by_type: serde_json::Map<String, Value> =
+        s.by_type.into_iter().map(|(t, n)| (t, json!(n))).collect();
     Ok(Json(json!({
         "memory_count": s.memory_count,
         "edge_count": s.edge_count,
         "project_count": s.project_count,
         "pending_jobs": s.pending_jobs,
+        "by_type": by_type,
     })))
 }
 

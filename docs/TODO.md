@@ -88,11 +88,11 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 
 > Exit: enrichment on/off per §8.11; context injection per §8.10.
 
-- [ ] core::enrich LLM client (async-openai, configurable endpoint, off by default)
-- [ ] Job types: summarize, extract_entities, extract_relations, score_importance
-- [ ] Retry with backoff → mark failed, never crash/block
-- [ ] core::project detect by abs path; normalize git remote for stable identity across clones
-- [ ] get_project_context: rank by importance×recency×access, truncate to token budget, return injection string
+- [x] core::enrich LLM client (async-openai, configurable endpoint, off by default)
+- [x] Job types: summarize, extract_entities, extract_relations, score_importance
+- [x] Retry with backoff → mark failed, never crash/block
+- [x] core::project detect by abs path; normalize git remote for stable identity across clones
+- [x] get_project_context: rank by importance×recency×access, truncate to token budget, return injection string (+ GET /api/context + SessionStart hook for zero-LLM injection)
 
 ---
 

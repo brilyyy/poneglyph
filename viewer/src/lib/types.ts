@@ -50,6 +50,7 @@ export interface Stats {
   edge_count: number
   project_count: number
   pending_jobs: number
+  by_type: Partial<Record<MemoryType, number>>
 }
 
 export interface MemoryDetail extends Memory {

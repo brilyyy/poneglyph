@@ -1,4 +1,33 @@
-import { Link, Outlet, createRootRoute } from '@tanstack/react-router'
+import { useState } from 'react'
+import { Link, Outlet, createRootRoute, useRouterState } from '@tanstack/react-router'
+import { useQuery } from '@tanstack/react-query'
+import { HugeiconsIcon } from '@hugeicons/react'
+import {
+  DashboardSquare01Icon,
+  Database01Icon,
+  Moon01Icon,
+  NeuralNetworkIcon,
+  Search01Icon,
+  Settings01Icon,
+  Sun01Icon,
+} from '@hugeicons/core-free-icons'
+
+import { api } from '#/lib/api.ts'
+import { getTheme, toggleTheme, type Theme } from '#/lib/theme.ts'
+import { Toaster } from '#/components/ui/sonner.tsx'
+import { Button } from '#/components/ui/button.tsx'
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+} from '#/components/ui/sidebar.tsx'
 
 import '../styles.css'
 
@@ -7,40 +36,70 @@ export const Route = createRootRoute({
 })
 
 const NAV = [
-  { to: '/', label: 'Dashboard' },
-  { to: '/memories', label: 'Memories' },
-  { to: '/search', label: 'Search' },
-  { to: '/graph', label: 'Graph' },
-  { to: '/settings', label: 'Settings' },
+  { to: '/', label: 'Dashboard', icon: DashboardSquare01Icon, exact: true },
+  { to: '/memories', label: 'Memories', icon: Database01Icon, exact: false },
+  { to: '/search', label: 'Search', icon: Search01Icon, exact: false },
+  { to: '/graph', label: 'Graph', icon: NeuralNetworkIcon, exact: false },
+  { to: '/settings', label: 'Settings', icon: Settings01Icon, exact: false },
 ] as const
 
 function RootComponent() {
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const stats = useQuery({ queryKey: ['stats'], queryFn: api.stats })
+  const [theme, setThemeState] = useState<Theme>(getTheme)
+
   return (
-    <div className="flex min-h-screen bg-zinc-50 text-zinc-900">
-      <aside className="flex w-52 shrink-0 flex-col border-r border-zinc-200 bg-white">
-        <div className="px-5 py-5">
-          <h1 className="text-lg font-bold tracking-tight">poneglyph</h1>
-          <p className="text-xs text-zinc-400">local memory engine</p>
-        </div>
-        <nav className="flex flex-col gap-0.5 px-3">
-          {NAV.map((item) => (
-            <Link
-              key={item.to}
-              to={item.to}
-              className="rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100"
-              activeProps={{
-                className: 'rounded-lg px-3 py-2 text-sm font-medium bg-zinc-900 text-white',
-              }}
-              activeOptions={{ exact: item.to === '/' }}
+    <SidebarProvider>
+      <Sidebar collapsible="icon">
+        <SidebarHeader>
+          <div className="flex items-center gap-2 px-2 py-1.5 group-data-[collapsible=icon]:px-0">
+            <span className="text-lg font-bold tracking-tight group-data-[collapsible=icon]:hidden">
+              poneglyph
+            </span>
+          </div>
+        </SidebarHeader>
+        <SidebarContent>
+          <SidebarMenu className="px-2">
+            {NAV.map((item) => {
+              const active = item.exact ? pathname === item.to : pathname.startsWith(item.to)
+              return (
+                <SidebarMenuItem key={item.to}>
+                  <SidebarMenuButton asChild isActive={active} tooltip={item.label}>
+                    <Link to={item.to}>
+                      <HugeiconsIcon icon={item.icon} strokeWidth={1.8} />
+                      <span>{item.label}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )
+            })}
+          </SidebarMenu>
+        </SidebarContent>
+        <SidebarFooter>
+          <div className="flex items-center justify-between gap-2 px-2 pb-1 group-data-[collapsible=icon]:flex-col">
+            <span className="truncate text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
+              {stats.data
+                ? `${stats.data.memory_count.toLocaleString()} memories · ${stats.data.project_count} projects`
+                : '…'}
+            </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Toggle dark mode"
+              onClick={() => setThemeState(toggleTheme())}
             >
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-      </aside>
-      <main className="min-w-0 flex-1 p-6">
-        <Outlet />
-      </main>
-    </div>
+              <HugeiconsIcon icon={theme === 'dark' ? Sun01Icon : Moon01Icon} strokeWidth={1.8} />
+            </Button>
+          </div>
+        </SidebarFooter>
+      </Sidebar>
+      <SidebarInset>
+        <main className="min-w-0 flex-1 p-6">
+          <SidebarTrigger className="mb-2 md:hidden" />
+          <Outlet />
+        </main>
+      </SidebarInset>
+      <Toaster />
+    </SidebarProvider>
   )
 }
