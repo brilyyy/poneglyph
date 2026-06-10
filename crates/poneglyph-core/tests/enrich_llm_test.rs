@@ -233,3 +233,87 @@ async fn unreachable_endpoint_fails_gracefully_system_unaffected() {
         .unwrap();
     assert!(store.get_memory(&m2.id).unwrap().is_some());
 }
+
+#[tokio::test]
+async fn corrupt_job_with_missing_memory_fails_gracefully() {
+    let (endpoint, _srv) = mock_llm("should not matter").await;
+    let client = client_for(&endpoint);
+    let mut store = Store::open_in_memory().unwrap();
+
+    // Insert a job referencing a non-existent memory (FK violation scenario).
+    // Foreign keys are ON, so INSERT will fail — but we bypass with raw SQL
+    // to simulate a corrupt row.
+    store
+        .conn
+        .execute_batch("PRAGMA foreign_keys = OFF")
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO jobs (id, job_type, memory_id, status, attempts, created_at, updated_at)
+             VALUES ('bad-job', 'compute_edges', 'no-such-memory', 'pending', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    store.conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+
+    // Process should not crash — the edge build will fail (memory not found)
+    // and the job gets retried/failed gracefully.
+    let mut cfg = worker_cfg();
+    cfg.enrichment.enabled = true;
+    cfg.llm = LlmConfig {
+        enabled: true,
+        endpoint: Some(endpoint),
+        model: Some("mock-model".into()),
+        api_key: None,
+    };
+
+    let result = enrich::process_jobs_async(&mut store, &cfg, Some(&client)).await;
+    assert!(result.is_ok(), "corrupt job must not crash the worker");
+
+    // System still functional.
+    let m = store.create_memory("after corrupt", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+    assert!(store.get_memory(&m.id).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn llm_disabled_job_marked_failed_immediately() {
+    let mut store = Store::open_in_memory().unwrap();
+    let m = store
+        .create_memory("x", MemoryType::Fact, 0.5, Source::Cli, None, None)
+        .unwrap();
+    store.create_job(JobType::Summarize, &m.id).unwrap();
+
+    let mut cfg = worker_cfg();
+    cfg.enrichment.enabled = false; // LLM disabled
+    cfg.llm.enabled = false;
+
+    let processed = enrich::process_jobs_async(&mut store, &cfg, None).await.unwrap();
+    assert_eq!(processed, 1);
+
+    let status: String = store
+        .conn
+        .query_row("SELECT status FROM jobs WHERE memory_id = ?1", [&m.id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(status, "failed");
+}
+
+#[tokio::test]
+async fn edge_only_jobs_work_with_no_llm() {
+    let mut store = Store::open_in_memory().unwrap();
+    let a = store.create_memory("a", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+    let b = store.create_memory("b", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+    store.index_embedding(&a.id, &vec![1.0f32; 384]).unwrap();
+    store.index_embedding(&b.id, &vec![0.99f32; 384]).unwrap();
+    store.create_job(JobType::ComputeEdges, &a.id).unwrap();
+
+    let mut cfg = worker_cfg();
+    let processed = enrich::process_jobs_async(&mut store, &cfg, None).await.unwrap();
+    assert_eq!(processed, 1);
+
+    let status: String = store
+        .conn
+        .query_row("SELECT status FROM jobs WHERE memory_id = ?1", [&a.id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(status, "done");
+}

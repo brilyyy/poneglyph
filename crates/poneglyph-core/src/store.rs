@@ -1238,4 +1238,117 @@ mod tests {
         assert_eq!(sessions[0].session_id.as_deref(), Some("s1"));
         assert_eq!(sessions[1].session_id.as_deref(), Some("s2"));
     }
+
+    // -----------------------------------------------------------------------
+    // Failure injection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn double_delete_returns_false() {
+        let store = test_store();
+        let m = store.create_memory("x", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        assert!(store.delete_memory(&m.id).unwrap());
+        assert!(!store.delete_memory(&m.id).unwrap());
+    }
+
+    #[test]
+    fn get_nonexistent_memory_returns_none() {
+        let store = test_store();
+        assert!(store.get_memory("no-such-id").unwrap().is_none());
+    }
+
+    #[test]
+    fn update_nonexistent_memory_returns_false() {
+        let store = test_store();
+        assert!(!store.update_memory("no-such-id", "new").unwrap());
+    }
+
+    #[test]
+    fn merge_metadata_on_missing_memory_returns_false() {
+        let store = test_store();
+        let result = store.merge_metadata("no-such-id", &serde_json::json!({"x": 1})).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn list_memories_empty_db() {
+        let store = test_store();
+        let (memories, total) = store.list_memories(None, None, 100, 0).unwrap();
+        assert_eq!(total, 0);
+        assert!(memories.is_empty());
+    }
+
+    #[test]
+    fn stats_fresh_db() {
+        let store = test_store();
+        let s = store.stats().unwrap();
+        assert_eq!(s.memory_count, 0);
+        assert_eq!(s.edge_count, 0);
+        assert_eq!(s.project_count, 0);
+        assert_eq!(s.pending_jobs, 0);
+    }
+
+    #[test]
+    fn corrupt_metadata_json_handled() {
+        let store = test_store();
+        let id = Uuid::now_v7().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        // Insert a memory with malformed metadata JSON.
+        store.conn.execute(
+            "INSERT INTO memories (id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, access_count)
+             VALUES (?1, 'test', 'fact', 0.5, NULL, 'cli', ?2, ?3, ?3, 0)",
+            rusqlite::params![id, "NOT VALID JSON {{{", now],
+        ).unwrap();
+
+        // Should still be fetchable; metadata parses to None.
+        let mem = store.get_memory(&id).unwrap().unwrap();
+        assert!(mem.metadata.is_none());
+    }
+
+    #[test]
+    fn set_importance_clamped() {
+        let store = test_store();
+        let m = store.create_memory("x", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        store.set_importance(&m.id, 5.0).unwrap();
+        let mem = store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(mem.importance, 1.0);
+
+        store.set_importance(&m.id, -1.0).unwrap();
+        let mem = store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(mem.importance, 0.0);
+    }
+
+    #[test]
+    fn delete_memory_cascades_edges() {
+        let store = test_store();
+        let a = store.create_memory("a", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let b = store.create_memory("b", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        store.create_edge(&a.id, &b.id, EdgeType::Similarity, None, 0.9).unwrap();
+
+        let edge_count_before: i64 = store.conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0)).unwrap();
+        assert_eq!(edge_count_before, 1);
+
+        store.delete_memory(&a.id).unwrap();
+
+        let edge_count_after: i64 = store.conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0)).unwrap();
+        assert_eq!(edge_count_after, 0);
+    }
+
+    #[test]
+    fn graph_sample_empty_db() {
+        let store = test_store();
+        let (nodes, edges) = store.graph_sample(100).unwrap();
+        assert!(nodes.is_empty());
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn graph_neighborhood_unknown_focus() {
+        let store = test_store();
+        let result = store.graph_neighborhood("no-such-id", 1, 100);
+        // Should return empty, not error.
+        let (nodes, edges) = result.unwrap();
+        assert!(nodes.is_empty());
+        assert!(edges.is_empty());
+    }
 }
