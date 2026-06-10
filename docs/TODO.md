@@ -77,10 +77,10 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 
 > Exit: viewer loads with live data; graph explorer works (§8.12).
 
-- [ ] viewer/ TanStack Start + React + shadcn/ui + React Flow
-- [ ] Pages: Dashboard, Memories list+filters, Memory detail, Search, Graph explorer, Settings
-- [ ] Build to static assets; embed via rust-embed; served by poneglyph-http
-- [ ] Verify: poneglyph serve → localhost loads dashboard; graph renders 500 nodes + expansion
+- [x] viewer/ TanStack Router + Vite SPA + React + Tailwind + React Flow (Start's SSR unusable under rust-embed; hand-rolled UI primitives instead of shadcn CLI)
+- [x] Pages: Dashboard, Memories list+filters, Memory detail, Search, Graph explorer, Settings
+- [x] Build to static assets; embed via rust-embed (`embed-viewer` feature, default off; scripts/build-release.sh); served by poneglyph-http
+- [x] Verify: poneglyph serve → localhost loads dashboard; graph renders 500 nodes + expansion
 
 ---
 

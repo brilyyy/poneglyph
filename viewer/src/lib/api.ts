@@ -1,0 +1,83 @@
+import type {
+  GraphResponse,
+  ListResponse,
+  MemoryDetail,
+  Project,
+  SearchHit,
+  Stats,
+} from './types'
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const resp = await fetch(path, init)
+  const body = await resp.json().catch(() => null)
+  if (!resp.ok) {
+    const msg = body && typeof body.error === 'string' ? body.error : `HTTP ${resp.status}`
+    throw new Error(msg)
+  }
+  return body as T
+}
+
+function qs(params: Record<string, string | number | undefined>): string {
+  const sp = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== '') sp.set(k, String(v))
+  }
+  const s = sp.toString()
+  return s ? `?${s}` : ''
+}
+
+export const api = {
+  stats: () => request<Stats>('/api/stats'),
+
+  listMemories: (params: {
+    type?: string
+    project_path?: string
+    limit?: number
+    offset?: number
+  }) => request<ListResponse>(`/api/memories${qs(params)}`),
+
+  getMemory: (id: string) => request<MemoryDetail>(`/api/memories/${id}`),
+
+  patchMemory: (id: string, new_content: string) =>
+    request<{ id: string; updated: boolean }>(`/api/memories/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_content }),
+    }),
+
+  deleteMemory: (id: string) =>
+    request<{ deleted: boolean }>(`/api/memories/${id}`, { method: 'DELETE' }),
+
+  search: (params: { q: string; limit?: number; type?: string; project_path?: string }) =>
+    request<{ results: SearchHit[] }>(`/api/search${qs(params)}`),
+
+  graph: (params: { focus?: string; depth?: number; limit?: number }) =>
+    request<GraphResponse>(`/api/graph${qs(params)}`),
+
+  projects: () => request<{ projects: Project[] }>('/api/projects'),
+
+  getSettings: () => request<Record<string, any>>('/api/settings'),
+
+  patchSettings: (patch: Record<string, unknown>) =>
+    request<{ settings: Record<string, any>; restart_required: boolean }>('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
+}
+
+export function formatDate(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+export function truncate(s: string, max = 120): string {
+  return s.length <= max ? s : s.slice(0, max) + '…'
+}
