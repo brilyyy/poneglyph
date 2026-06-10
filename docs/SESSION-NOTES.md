@@ -1,92 +1,100 @@
-# Session Notes — 2026-06-10 (XDG paths, demo, context injection, M6, shadcn viewer)
+# Session Notes — 2026-06-10 (Session timeline, M7 hooks/hardening/docs, animated graph)
 
-State after this session: **M0–M6 complete** (remaining: M0 CI workflow, M2
-manual Claude Code/Desktop verify, M7). `cargo test --workspace` → 69 passed,
-2 ignored; +3 viewer tests behind `--features embed-viewer`. Viewer builds
-clean (`pnpm build` + `tsc --noEmit`).
+State after this session: **M7 partially complete** (hooks, failure tests,
+migration docs, INSTALL/INTEGRATIONS/README done; remaining: perf bench at 100k,
+retrieval eval harness, cross-platform binaries). `cargo test --workspace` → 91
+passed, 2 ignored. Viewer builds clean (`pnpm build`).
 
-Commits: `f2ce21d` (XDG paths) → `08141a9` (demo) → `3ecd80a` (/api/context +
-SessionStart hook) → `8c93496` (M6 LLM enrichment) → `2f846c0` (M6 git-remote
-identity) → `862727a` (shadcn viewer + UX).
+Commits: `ae6b775` (session timeline + demo seed-only + animated graph) →
+`9a03312` (Claude Code hooks) → `1d3564b` (OpenCode plugin) → `4ee9e10`
+(failure injection tests) → `9f4c21b` (docs) → `d7d5541` (TODO update).
 
 ## What was built
 
-### XDG default paths
-- config `~/.config/poneglyph/config.toml`, db `~/.local/share/poneglyph/`,
-  models `~/.cache/poneglyph/models` (PRD §8.14/§6.1). Windows keeps
-  ProjectDirs. `xdg_dir_from` is env-injectable for tests.
-- **Legacy fallback is read-only**: old macOS location used in place with a
-  warn + `mv` hint (also in `poneglyph status`); never auto-moved (WAL
-  sidecars). Explicit config paths unaffected. This machine still runs from
-  the legacy dir — move it when convenient.
+### Session-based memory timeline (Part A)
+- `metadata.session_id` hoisted to top-level in `ingest.rs` (canonical key);
+  legacy `extra.session_id` handled by SQL `COALESCE(json_extract(...))`.
+- `store::list_sessions()` — SQL fetch with COALESCE session_key, Rust-side
+  grouping (keyed by session_id, unkeyed by gap-split per project), sorted
+  `started_at DESC`, paginated at session level.
+- `GET /api/timeline?project_path=&limit=&offset=&gap_secs=` — returns
+  sessions with `session_id`, `project_name`, `started_at`, `ended_at`,
+  `memory_count`, full `memories` array.
+- Demo seeds `demo-session-N` metadata (N = `i/3 + 1`).
+- Frontend: `/timeline` route with reui timeline component (vendored from
+  reui.io), project filter, load-more pagination.
+- 6 new tests: list_sessions (session_id grouping, legacy extra.session_id,
+  gap-split, project filter, ordering), ingest session_id hoist, demo
+  session_id carry.
 
-### `poneglyph demo`
-- Seeds ~20 templates cycled to `--count` (default 60): 3 fake projects, all
-  6 types, tags, 2 near-dup pairs, backdated 30 days in temporal clusters
-  (raw SQL, demo-only), inline edge drain, hand-seeded explicit + labeled
-  relation edges. **Ephemeral TempDir DB by default**; `--db`/`--port` flags.
-  Serves HTTP-only with the embedded viewer.
+### `poneglyph demo` seed-only (Part B)
+- Dropped `--port`, added `--force`. Default target is `config.db_path`
+  (real store, no ephemeral tempfile). Guard: refuse non-empty DB without
+  `--force` or `--db`. Prints hint to run `poneglyph serve`.
+- Removed `tempfile` dep from poneglyph-cli.
 
-### Zero-token session context injection
-- `GET /api/context?project_path=&max_tokens=` wraps
-  `project::get_project_context` (behind bearer auth).
-- `hooks/claude-code/sessionstart.sh`: SessionStart stdout → injected
-  context. Budget `PONEGLYPH_CONTEXT_TOKENS` (default 600; config 2000 stays
-  for the MCP tool). Zero LLM calls; silent exit 0 when server down.
+### Animated graph explorer (Part C)
+- Live d3-force simulation in `simRef` (never recreated per render). Stable
+  `SimNode` objects in `simNodesRef` (d3 mutates them directly).
+- `sim.on('tick')` → rAF-throttled `setNodes` updating only positions.
+- Forces: `forceX/forceY` (not center), `forceCollide(85)`, `forceLink`
+  distance 180, `forceManyBody` -400. `alphaDecay(0.03)`, `velocityDecay(0.4)`.
+- Drag: `fx/fy` on drag start, `alphaTarget(0.3).restart()`, clear on stop.
+- `FloatingEdge` component: `useInternalNode` + `getBezierPath` + `BaseEdge`
+  + `EdgeLabelRenderer` for relation labels at bezier midpoint.
+- All existing features intact (expand-on-click, edge filters, MiniMap,
+  selected-memory card, legend, themes).
 
-### M6 — enrichment
-- `core::llm`: async-openai vs configurable endpoint. `from_config` → None
-  unless enabled+endpoint+model; worker constructs it only when
-  `enrichment.enabled` (AC1 — disabled ⇒ client never exists).
-- Handlers: summarize→metadata.summary (skip <280 chars);
-  extract_entities→entities+tags union → re-enqueue compute_edges;
-  extract_relations→relation edges grounded to top-5 embedding neighbours,
-  LLM picks by index (no dangling nodes); score_importance→importance.
-- Worker: plain async task **owning** Store, `&mut Store` through the async
-  chain (Store is Send not Sync; `&mut T` is Send — `&T` isn't). No more
-  spawn_blocking shuttle.
-- Retry: attempts bumped only by `mark_job_running`; failure → pending with
-  updated_at as retry stamp; due-filter in Rust (10s·2^attempts); failed at
-  3. Sync CLI drain skips LLM jobs (leaves pending for serve worker).
-- Wiring: MCP remember `llm_assist` + both config gates → 4 jobs; /ingest →
-  summarize only (passive volume). Tests vs in-process axum mock (real wire
-  path) incl. garbage-reply retry-to-failed and unreachable-endpoint
-  failure injection.
+### Claude Code hooks — perfect
+- `posttooluse.sh`: removed `Task` from skip list, added `tool_output`
+  (truncated 2000 chars) to payload.
+- **New `stop.sh`**: reads `transcript_path` from Stop event stdin, extracts
+  last assistant message (reverse JSONL scan), POSTs as `assistant_message`.
+- `settings.json.example`: expanded PostToolUse matcher to include `Agent|Task`,
+  added Stop hook entry.
+- README: documented all 4 hooks, capture matrix, env vars, verify steps.
 
-### M6 — git-remote identity
-- `read_git_remote` parses `.git/config` directly (follows `gitdir:`
-  pointers); `normalize_git_remote` → `host/org/repo` (ssh/scp/https/user@/
-  port/.git forms). detect_project: path hit (backfills NULL remote) →
-  remote hit (same project, **original path kept**, AC2) → new upsert.
-  CLI remember now uses detect_project.
+### OpenCode plugin — perfect
+- Added `message.updated` hook for assistant message capture.
+- Fixed `directory` to use `ctx.directory` from plugin context.
+- Extracted shared `ingest()` helper with `AbortSignal.timeout(2000)`.
+- Added `todoread` to skip list.
+- README: corrected install path (`.opencode/plugins/` not `.opencode/plugin/`),
+  documented all captured events.
 
-### Viewer — shadcn + UX
-- User had run `shadcn init` (style radix-luma, hugeicons, `#/` aliases);
-  this session added ~20 components and migrated everything; `ui.tsx`
-  deleted; `@/*` alias dropped from tsconfig. TypeBadge wraps shadcn Badge.
-- UX: icon-collapsible Sidebar + live stats footer + dark-mode toggle
-  (localStorage + pre-paint script in index.html); sonner toasts;
-  AlertDialog delete; Table memories list, relative timestamps
-  (`formatRelative`); debounced search-as-you-type (`keepPreviousData`);
-  graph MiniMap + colorMode + selected-node card; Field/Switch settings;
-  dashboard type-breakdown bars. `/api/stats` gained `by_type` (GROUP BY).
+### Failure injection tests (M7)
+- **store.rs** (11 new tests): double_delete, nonexistent memory ops
+  (get/update/merge_metadata), empty DB (list/stats), corrupt metadata JSON,
+  importance clamping, delete cascade edges, graph_sample/neighborhood on
+  empty/unknown.
+- **enrich_llm_test.rs** (3 new tests): corrupt job with missing memory_id
+  (FK violation simulation), LLM disabled → fail immediately, edge-only jobs
+  with no LLM client.
+- Total: 91 tests passing.
+
+### Docs (M7)
+- `README.md`: project overview, quick start, architecture diagram, config table.
+- `docs/INSTALL.md`: build from source, first run, model download, config, CLI.
+- `docs/INTEGRATIONS.md`: Claude Code hooks (all 4), Claude Desktop MCP,
+  OpenCode plugin, env vars, security notes.
+- `docs/MIGRATION.md`: v0→v1 genesis path, schema version tracking, embedding
+  dimension warnings.
 
 ## Gotchas
-- Generated shadcn `spinner.tsx` conflicts with HugeiconsIcon strokeWidth
-  typing — fixed with `Omit<ComponentProps<"svg">, "strokeWidth">`. May
-  recur if the component is re-generated with `--overwrite`.
-- `XDG paths commit (f2ce21d) accidentally also picked up the user's
-  untracked shadcn init files — intentional content, early landing.
-- hugeicons names verified against dist/types/index.d.ts (5473 icons);
-  NeuralNetworkIcon = graph nav icon.
-- Demo with model available takes ~20 s to embed 30+ seeds before the
-  server binds — don't curl too early.
+- RTK output for `cargo check` only shows warning locations (file:line) without
+  the actual message — use `cargo check` directly if compilation errors need
+  debugging.
+- Claude Code Stop event provides `transcript_path` (JSONL file). Extracting
+  the last assistant message requires reverse-scanning; `tail -r` is macOS
+  specific (GNU: `tac`).
+- OpenCode plugin events don't have consistent input schemas —
+  `message.updated` input has `role`/`content` but typing is loose (`any`).
+- The `tail -r` approach for stop.sh works on macOS but would need `tac` on
+  Linux. Could use `awk` for portability if needed.
 
 ## Not done / next
-- M0: CI workflow (test default + `--features embed-viewer`; release job
-  runs scripts/build-release.sh).
-- M2 manual verify: Claude Code + Desktop MCP round-trip; hooks end-to-end
-  in a real session (incl. new sessionstart.sh).
+- M0: CI workflow.
+- M2 manual verify: Claude Code + Desktop MCP round-trip.
+- M7: perf bench at 100k (criterion), retrieval eval (recall@10), cross-platform
+  release binaries.
 - Live LLM check vs Ollama (mock-tested only).
-- M7 hardening: perf bench at 100k, retrieval eval, migration docs,
-  release binaries, INSTALL/INTEGRATIONS docs.
