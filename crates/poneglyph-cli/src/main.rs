@@ -278,6 +278,12 @@ async fn cmd_remember(
     let store = Store::open(&config.db_path)?;
     let embedder = try_embedder(config).await;
 
+    let exclude_matcher = poneglyph_core::privacy::build_exclude_matcher(&config.privacy.exclude_paths);
+    if poneglyph_core::privacy::content_references_excluded_path(content, &exclude_matcher) {
+        anyhow::bail!("refusing to store: content references an excluded path (see [privacy].exclude_paths)");
+    }
+    let content = poneglyph_core::privacy::redact_content(content, &config.privacy);
+
     let mem_type: MemoryType = memory_type.parse().unwrap_or(MemoryType::Semantic);
 
     // Resolve project (path → git-remote identity fallback).
@@ -293,7 +299,7 @@ async fn cmd_remember(
     };
 
     let mem = store.create_memory(
-        content,
+        &content,
         mem_type,
         importance,
         Source::Cli,
@@ -302,9 +308,9 @@ async fn cmd_remember(
     )?;
 
     // Index FTS + vector
-    store.index_fts(&mem.id, content)?;
+    store.index_fts(&mem.id, &content)?;
     if let Some(embedder) = &embedder {
-        let vec = embedder.embed_text(content).await?;
+        let vec = embedder.embed_text(&content).await?;
         store.index_embedding(&mem.id, &vec)?;
     }
 

@@ -9,3 +9,5 @@ pub mod project;
 pub mod llm;
 pub mod cold;
 pub mod consolidate;
+pub mod privacy;
+pub mod compress;

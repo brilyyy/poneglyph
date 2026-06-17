@@ -23,6 +23,8 @@ toml            = { workspace = true }
 directories     = { workspace = true }
 candle-core     = { workspace = true }
 reqwest         = { workspace = true }
+regex           = { workspace = true }
+globset         = { workspace = true }
 zstd            = { workspace = true }
 
 [dev-dependencies]
