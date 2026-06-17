@@ -48,6 +48,9 @@ moka = { version = "0.12", features = ["future"] }
 # Optional LLM calls (OpenAI-compatible endpoint)
 async-openai = { version = "0.27" }
 
+# Direct HTTP for non-OpenAI-compat providers (Anthropic, Gemini, Ollama embeddings)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 # Static viewer embedding
 rust-embed = { version = "8", features = ["axum"] }
 

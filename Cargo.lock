@@ -2969,6 +2969,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -4366,6 +4367,7 @@ dependencies = [
  "embed_anything",
  "figment",
  "moka",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -5118,6 +5120,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
