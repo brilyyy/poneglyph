@@ -7,7 +7,7 @@ use tracing::info;
 use uuid::Uuid;
 use crate::model::*;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Max ids per SQL `IN (...)` list — stays under SQLite's default 999-param limit.
 const SQL_IN_CHUNK: usize = 900;
@@ -157,6 +157,14 @@ CREATE INDEX IF NOT EXISTS idx_cg_edges_src ON cg_edges(src_id);
 CREATE INDEX IF NOT EXISTS idx_cg_edges_dst ON cg_edges(dst_id);
 "#;
 
+// Compression cache. `compressed_content` is never read by recall/FTS/vector
+// search — only by context-injection (project::get_project_context), which
+// falls back to `content` when absent. `content` itself is never overwritten.
+const DDL_V4: &str = r#"
+ALTER TABLE memories ADD COLUMN compressed_content TEXT;
+ALTER TABLE memories ADD COLUMN compression_mode    TEXT;
+"#;
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -228,6 +236,15 @@ impl Store {
                 [],
             )?;
             info!(version = 3, "schema migrated");
+        }
+
+        if version < 4 {
+            self.conn.execute_batch(DDL_V4).context("DDL v4 failed")?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '4')",
+                [],
+            )?;
+            info!(version = 4, "schema migrated");
         }
 
         Ok(())
@@ -491,6 +508,38 @@ impl Store {
             params![importance.clamp(0.0, 1.0), now, id],
         )?;
         Ok(updated > 0)
+    }
+
+    /// Cache a token-reduced rewrite for context injection. Never touches
+    /// `content` — recall/FTS/vector search must keep reading the original.
+    pub fn set_compressed_content(&self, id: &str, text: &str, mode: &str) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE memories SET compressed_content = ?1, compression_mode = ?2 WHERE id = ?3",
+            params![text, mode, id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Drop a stale compressed rewrite — call when `content` changes so
+    /// context-injection doesn't serve text for the previous edit.
+    pub fn clear_compressed_content(&self, id: &str) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE memories SET compressed_content = NULL, compression_mode = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    pub fn get_compressed_content(&self, id: &str) -> Result<Option<(String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT compressed_content, compression_mode FROM memories \
+                 WHERE id = ?1 AND compressed_content IS NOT NULL",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e.into()) })
     }
 
     pub fn update_memory(&self, id: &str, new_content: &str) -> Result<bool> {
@@ -1853,6 +1902,44 @@ mod tests {
         store.set_importance(&m.id, -1.0).unwrap();
         let mem = store.get_memory(&m.id).unwrap().unwrap();
         assert_eq!(mem.importance, 0.0);
+    }
+
+    #[test]
+    fn compressed_content_round_trips() {
+        let store = test_store();
+        let m = store.create_memory("hello world", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+
+        assert!(store.get_compressed_content(&m.id).unwrap().is_none());
+
+        store.set_compressed_content(&m.id, "h3ll0 w0rld", "caveman").unwrap();
+        let (text, mode) = store.get_compressed_content(&m.id).unwrap().unwrap();
+        assert_eq!(text, "h3ll0 w0rld");
+        assert_eq!(mode, "caveman");
+
+        // content itself must be untouched.
+        let mem = store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(mem.content, "hello world");
+
+        store.clear_compressed_content(&m.id).unwrap();
+        assert!(store.get_compressed_content(&m.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn schema_version_is_4_with_compression_columns() {
+        let store = test_store();
+        assert_eq!(SCHEMA_VERSION, 4);
+        let m = store.create_memory("x", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        // Columns exist and are queryable (NULL until set).
+        let (compressed, mode): (Option<String>, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT compressed_content, compression_mode FROM memories WHERE id = ?1",
+                params![m.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(compressed.is_none());
+        assert!(mode.is_none());
     }
 
     #[test]

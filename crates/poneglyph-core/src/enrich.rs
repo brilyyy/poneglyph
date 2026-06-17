@@ -18,7 +18,7 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::config::{EnrichmentConfig, LlmConfig, MemoryEdgesConfig};
+use crate::config::{CompressionMode, EnrichmentConfig, LlmConfig, MemoryEdgesConfig};
 use crate::graph;
 use crate::model::{Job, JobStatus, JobType};
 use crate::store::Store;
@@ -40,6 +40,11 @@ pub struct WorkerConfig {
     pub edges: MemoryEdgesConfig,
     pub llm: LlmConfig,
     pub enrichment: EnrichmentConfig,
+    /// Compression is orthogonal to `enrichment.enabled` — semantic mode
+    /// still needs an LLM client, so the worker must know to construct one
+    /// even when enrichment itself is off.
+    pub compression_enabled: bool,
+    pub compression_mode: CompressionMode,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +68,30 @@ pub fn enqueue_llm_jobs(store: &Store, memory_id: &str) -> Result<()> {
         store.create_job(jt, memory_id)?;
     }
     Ok(())
+}
+
+/// Compress a memory for context injection per `[memory].compression_mode`
+/// (caller gates on `compression_enabled`). Caveman mode is byte-exact and
+/// cheap enough to run inline, synchronously, right here — no job needed.
+/// Semantic mode needs the async LLM client, so it goes through the job
+/// queue like the other LLM jobs; the worker falls back to caveman if no
+/// LLM ends up configured (see `llm::compress_caveman_fallback`).
+pub fn enqueue_compression(store: &Store, memory_id: &str, mode: CompressionMode) -> Result<()> {
+    match mode {
+        CompressionMode::Caveman => {
+            if let Some(m) = store.get_memory(memory_id)?
+                && m.content.len() >= crate::llm::SUMMARIZE_MIN_CHARS
+            {
+                let compressed = crate::compress::compress(&m.content);
+                store.set_compressed_content(memory_id, &compressed, "caveman")?;
+            }
+            Ok(())
+        }
+        CompressionMode::Semantic => {
+            store.create_job(JobType::ExtractCompress, memory_id)?;
+            Ok(())
+        }
+    }
 }
 
 fn backoff(attempts: i64) -> chrono::Duration {
@@ -148,6 +177,14 @@ pub async fn process_jobs_async(
                     debug!(memory_id = %job.memory_id, edges = n, "computed edges");
                 })
             }
+            // Compression degrades gracefully instead of failing: no LLM
+            // configured just means the caveman fallback runs in its place.
+            JobType::ExtractCompress => match llm {
+                Some(client) => {
+                    crate::llm::run_job(&mut *store, client, &job.job_type, &job.memory_id).await
+                }
+                None => crate::llm::compress_caveman_fallback(&mut *store, &job.memory_id),
+            },
             ref llm_type => match llm {
                 Some(client) => crate::llm::run_job(&mut *store, client, llm_type, &job.memory_id).await,
                 // Stale rows from a previously-enabled config: fail once,
@@ -212,14 +249,18 @@ pub fn spawn_worker(
             }
         };
 
-        let llm = if cfg.enrichment.enabled {
+        // Compression is orthogonal to enrichment: semantic mode needs an
+        // LLM client even when enrichment.enabled is false.
+        let needs_llm = cfg.enrichment.enabled
+            || (cfg.compression_enabled && cfg.compression_mode == CompressionMode::Semantic);
+        let llm = if needs_llm {
             match crate::llm::LlmClient::from_config(&cfg.llm) {
                 Some(c) => {
-                    info!(model = %cfg.llm.model.as_deref().unwrap_or("?"), "LLM enrichment enabled");
+                    info!(model = %cfg.llm.model.as_deref().unwrap_or("?"), "LLM client constructed");
                     Some(c)
                 }
                 None => {
-                    warn!("enrichment.enabled but llm config incomplete (need enabled+endpoint+model); LLM jobs will fail");
+                    warn!("enrichment/compression enabled but llm config incomplete (need enabled+endpoint+model); LLM jobs will fail, semantic compression will fall back to caveman");
                     None
                 }
             }
@@ -263,6 +304,8 @@ mod tests {
             edges: MemoryEdgesConfig::default(),
             llm: LlmConfig::default(),
             enrichment: EnrichmentConfig::default(),
+            compression_enabled: false,
+            compression_mode: CompressionMode::default(),
         }
     }
 

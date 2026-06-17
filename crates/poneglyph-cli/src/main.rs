@@ -217,6 +217,8 @@ async fn cmd_serve(config: &Config) -> Result<()> {
             edges: config.memory.edges.clone(),
             llm: config.llm.clone(),
             enrichment: config.enrichment.clone(),
+            compression_enabled: config.memory.compression_enabled,
+            compression_mode: config.memory.compression_mode,
         },
     );
 
@@ -371,6 +373,12 @@ async fn cmd_remember(
     // exist without a running server (no-LLM builders are cheap).
     poneglyph_core::enrich::enqueue_compute_edges(&store, &mem.id)?;
     poneglyph_core::enrich::process_pending_jobs(&store, &config.memory.edges)?;
+
+    // Caveman compression runs inline above; semantic compression enqueues a
+    // job for whichever resident `serve` worker drains it next.
+    if config.memory.compression_enabled {
+        poneglyph_core::enrich::enqueue_compression(&store, &mem.id, config.memory.compression_mode)?;
+    }
 
     println!("{}", mem.id);
     Ok(())

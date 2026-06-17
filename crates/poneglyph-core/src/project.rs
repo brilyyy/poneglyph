@@ -158,7 +158,13 @@ pub fn get_project_context(
     let mut count = 0usize;
 
     for m in &memories {
-        let line = format!("- [{}] {}\n", m.memory_type, m.content.trim());
+        // Prefer the cached compressed rewrite; recall/FTS/vector search
+        // never falls back to it, only context-injection does, right here.
+        let text = match store.get_compressed_content(&m.id)? {
+            Some((compressed, _mode)) => compressed,
+            None => m.content.trim().to_string(),
+        };
+        let line = format!("- [{}] {}\n", m.memory_type, text);
         if !out.is_empty() && out.len() + line.len() > budget_chars {
             break;
         }
@@ -295,5 +301,26 @@ mod tests {
         // Tiny budget: only the top memory fits.
         let (_ctx_small, n_small) = get_project_context(&store, "/home/u/proj", 10).unwrap();
         assert_eq!(n_small, 1);
+    }
+
+    #[test]
+    fn context_prefers_compressed_content_falls_back_when_absent() {
+        let store = Store::open_in_memory().unwrap();
+        let p = detect_project(&store, "/home/u/proj").unwrap();
+
+        let compressed_one = store
+            .create_memory("original verbose text for one", MemoryType::Fact, 0.9, Source::Cli, Some(&p.id), None)
+            .unwrap();
+        store.set_compressed_content(&compressed_one.id, "compressed stand-in", "caveman").unwrap();
+
+        store
+            .create_memory("original verbose text for two", MemoryType::Fact, 0.5, Source::Cli, Some(&p.id), None)
+            .unwrap();
+
+        let (ctx, n) = get_project_context(&store, "/home/u/proj", 2000).unwrap();
+        assert_eq!(n, 2);
+        assert!(ctx.contains("compressed stand-in"));
+        assert!(!ctx.contains("original verbose text for one"));
+        assert!(ctx.contains("original verbose text for two"));
     }
 }

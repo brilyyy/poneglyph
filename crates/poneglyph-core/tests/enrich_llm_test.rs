@@ -10,10 +10,11 @@ use axum::routing::post;
 use axum::Json;
 use serde_json::{json, Value};
 
-use poneglyph_core::config::{EnrichmentConfig, LlmConfig, MemoryEdgesConfig};
+use poneglyph_core::config::{CompressionMode, EnrichmentConfig, LlmConfig, MemoryEdgesConfig};
 use poneglyph_core::enrich::{self, WorkerConfig};
 use poneglyph_core::llm::LlmClient;
 use poneglyph_core::model::{EdgeType, JobType, MemoryType, Source};
+use poneglyph_core::retrieve::{recall, RecallFilters};
 use poneglyph_core::store::Store;
 
 /// Spawn a mock /chat/completions endpoint that always replies `content`.
@@ -61,6 +62,8 @@ fn worker_cfg() -> WorkerConfig {
         edges: MemoryEdgesConfig::default(),
         llm: LlmConfig::default(),
         enrichment: EnrichmentConfig::default(),
+        compression_enabled: false,
+        compression_mode: CompressionMode::default(),
     }
 }
 
@@ -173,6 +176,99 @@ async fn score_importance_updates_memory() {
         .unwrap();
     let updated = store.get_memory(&m.id).unwrap().unwrap();
     assert!((updated.importance - 0.85).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn extract_compress_stores_semantic_rewrite_distinct_from_input() {
+    let (endpoint, _srv) = mock_llm("Migrated ingestion pipeline from batch to streaming consumer.").await;
+    let client = client_for(&endpoint);
+    let mut store = Store::open_in_memory().unwrap();
+
+    let m = store
+        .create_memory(&long_content(), MemoryType::Semantic, 0.5, Source::Cli, None, None)
+        .unwrap();
+
+    poneglyph_core::llm::run_job(&mut store, &client, &JobType::ExtractCompress, &m.id)
+        .await
+        .unwrap();
+
+    let (compressed, mode) = store.get_compressed_content(&m.id).unwrap().unwrap();
+    assert_eq!(mode, "semantic");
+    assert!(!compressed.is_empty());
+    assert_ne!(compressed, m.content);
+
+    // Original content is the source of truth, untouched.
+    let mem = store.get_memory(&m.id).unwrap().unwrap();
+    assert_eq!(mem.content, long_content());
+}
+
+#[tokio::test]
+async fn extract_compress_skips_short_content() {
+    let (endpoint, _srv) = mock_llm("should never be called").await;
+    let client = client_for(&endpoint);
+    let mut store = Store::open_in_memory().unwrap();
+
+    let m = store
+        .create_memory("short note", MemoryType::Fact, 0.5, Source::Cli, None, None)
+        .unwrap();
+    poneglyph_core::llm::run_job(&mut store, &client, &JobType::ExtractCompress, &m.id)
+        .await
+        .unwrap();
+    assert!(store.get_compressed_content(&m.id).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn no_llm_configured_extract_compress_job_falls_back_to_caveman_without_failing() {
+    let mut store = Store::open_in_memory().unwrap();
+    let m = store
+        .create_memory(&long_content(), MemoryType::Fact, 0.5, Source::Cli, None, None)
+        .unwrap();
+    store.create_job(JobType::ExtractCompress, &m.id).unwrap();
+
+    let mut cfg = worker_cfg();
+    cfg.compression_enabled = true;
+    cfg.compression_mode = CompressionMode::Semantic;
+    // cfg.llm stays default/disabled — from_config inside spawn_worker would
+    // return None; process_jobs_async is exercised directly here with
+    // `llm: None` to simulate exactly that outcome.
+
+    let processed = enrich::process_jobs_async(&mut store, &cfg, None).await.unwrap();
+    assert_eq!(processed, 1);
+
+    let status: String = store
+        .conn
+        .query_row("SELECT status FROM jobs WHERE memory_id = ?1", [&m.id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(status, "done", "compression must degrade gracefully, not fail the job");
+
+    let (_compressed, mode) = store.get_compressed_content(&m.id).unwrap().unwrap();
+    assert_eq!(mode, "caveman");
+}
+
+#[tokio::test]
+async fn recall_never_reads_compressed_content_even_when_present() {
+    let (endpoint, _srv) = mock_llm("Migrated ingestion pipeline from batch to streaming consumer.").await;
+    let client = client_for(&endpoint);
+    let mut store = Store::open_in_memory().unwrap();
+
+    let m = store
+        .create_memory(&long_content(), MemoryType::Semantic, 0.5, Source::Cli, None, None)
+        .unwrap();
+    store.index_fts(&m.id, &long_content()).unwrap();
+
+    poneglyph_core::llm::run_job(&mut store, &client, &JobType::ExtractCompress, &m.id)
+        .await
+        .unwrap();
+    let (compressed, _mode) = store.get_compressed_content(&m.id).unwrap().unwrap();
+    assert!(!compressed.contains("schema drift"), "test setup: keyword must only be in the original");
+
+    // "schema drift" appears only in the original content, never in the
+    // compressed rewrite — recall finding it proves recall reads `content`.
+    let results = recall(&store.conn, None, "schema drift", &RecallFilters::default(), 10).unwrap();
+    assert!(
+        results.iter().any(|r| r.memory.id == m.id),
+        "recall must search original content, never the compressed cache"
+    );
 }
 
 #[tokio::test]

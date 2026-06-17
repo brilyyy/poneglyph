@@ -322,6 +322,12 @@ impl PoneglyphMcp {
                 enrich::enqueue_llm_jobs(&store, &mem.id).map_err(internal)?;
             }
 
+            // Compression is orthogonal to llm_assist/enrichment.
+            if self.config.memory.compression_enabled {
+                enrich::enqueue_compression(&store, &mem.id, self.config.memory.compression_mode)
+                    .map_err(internal)?;
+            }
+
             mem.id
         };
 
@@ -406,6 +412,9 @@ impl PoneglyphMcp {
                 }
                 // Content changed ⇒ similarity edges may have changed.
                 enrich::enqueue_compute_edges(&store, &req.id).map_err(internal)?;
+                // Drop any cached compression for the old content — stale
+                // otherwise, since nothing here regenerates it.
+                store.clear_compressed_content(&req.id).map_err(internal)?;
             }
             updated
         };

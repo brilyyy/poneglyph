@@ -108,6 +108,9 @@ pub async fn patch_memory(
                 store.index_embedding(&id, vec)?;
             }
             enrich::enqueue_compute_edges(&store, &id)?;
+            // Drop any cached compression for the old content — stale
+            // otherwise, since nothing here regenerates it.
+            store.clear_compressed_content(&id)?;
         }
         updated
     };

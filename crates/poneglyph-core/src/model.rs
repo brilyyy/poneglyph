@@ -125,6 +125,9 @@ pub enum JobType {
     ExtractEntities,
     ExtractRelations,
     ScoreImportance,
+    /// Token-reduced retrievable rewrite for context injection only — never a substitute
+    /// for `memories.content` in recall/FTS/vector search.
+    ExtractCompress,
 }
 
 impl std::fmt::Display for JobType {
@@ -135,6 +138,7 @@ impl std::fmt::Display for JobType {
             Self::ExtractEntities => "extract_entities",
             Self::ExtractRelations => "extract_relations",
             Self::ScoreImportance => "score_importance",
+            Self::ExtractCompress => "extract_compress",
         };
         write!(f, "{s}")
     }
@@ -149,6 +153,7 @@ impl std::str::FromStr for JobType {
             "extract_entities" => Ok(Self::ExtractEntities),
             "extract_relations" => Ok(Self::ExtractRelations),
             "score_importance" => Ok(Self::ScoreImportance),
+            "extract_compress" => Ok(Self::ExtractCompress),
             _ => Err(anyhow::anyhow!("unknown job_type: {s}")),
         }
     }
@@ -429,4 +434,25 @@ fn default_memory_type() -> MemoryType {
 
 fn default_importance() -> f64 {
     0.5
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn job_type_round_trips_through_string() {
+        for jt in [
+            JobType::ComputeEdges,
+            JobType::Summarize,
+            JobType::ExtractEntities,
+            JobType::ExtractRelations,
+            JobType::ScoreImportance,
+            JobType::ExtractCompress,
+        ] {
+            let s = jt.to_string();
+            assert_eq!(JobType::from_str(&s).unwrap(), jt);
+        }
+    }
 }

@@ -142,6 +142,11 @@ pub async fn ingest(
             store.create_job(poneglyph_core::model::JobType::Summarize, &mem.id)?;
         }
 
+        // Compression is orthogonal to enrichment.
+        if state.config.memory.compression_enabled {
+            enrich::enqueue_compression(&store, &mem.id, state.config.memory.compression_mode)?;
+        }
+
         mem.id
     };
 

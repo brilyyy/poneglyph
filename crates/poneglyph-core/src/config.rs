@@ -146,6 +146,19 @@ impl Default for MemoryEdgesConfig {
     }
 }
 
+/// How `compression_enabled` reduces a memory for context injection.
+/// `content` itself is never overwritten by either mode (see `compressed_content`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionMode {
+    /// Deterministic caveman-grammar substitution only (`compress::compress`).
+    #[default]
+    Caveman,
+    /// Local-LLM extractive rewrite, then caveman-compress the result too.
+    /// Falls back to `Caveman` when no usable LLM config is reachable.
+    Semantic,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
     /// Enable/disable the memory observer entirely.
@@ -156,6 +169,9 @@ pub struct MemoryConfig {
     pub max_entry_tokens: usize,
     /// Compress prose at rest (caveman grammar). Expanded on retrieval.
     pub compression_enabled: bool,
+    /// Which compression strategy `compression_enabled` applies.
+    #[serde(default)]
+    pub compression_mode: CompressionMode,
     /// Minimum relevance score (0.0-1.0) for a memory to be stored.
     pub min_relevance_score: f64,
     #[serde(default)]
@@ -173,6 +189,7 @@ impl Default for MemoryConfig {
             // Off until the Phase 2 compression pipeline lands; flipping this on
             // without it would be a no-op.
             compression_enabled: false,
+            compression_mode: CompressionMode::default(),
             min_relevance_score: 0.6,
             layer_retention: LayerRetention::default(),
             edges: MemoryEdgesConfig::default(),

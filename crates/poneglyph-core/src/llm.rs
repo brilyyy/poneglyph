@@ -28,8 +28,9 @@ use crate::graph;
 use crate::model::{EdgeType, JobType};
 use crate::store::Store;
 
-/// Min content length worth summarizing.
-const SUMMARIZE_MIN_CHARS: usize = 280;
+/// Min content length worth summarizing (also gates compression — short
+/// memories aren't worth the round-trip either way).
+pub(crate) const SUMMARIZE_MIN_CHARS: usize = 280;
 /// Neighbour candidates offered to the relation extractor.
 const RELATION_CANDIDATES: usize = 5;
 
@@ -324,8 +325,28 @@ pub async fn run_job(
         JobType::ExtractEntities => extract_entities(store, client, &memory).await,
         JobType::ExtractRelations => extract_relations(store, client, &memory).await,
         JobType::ScoreImportance => score_importance(store, client, &memory).await,
+        JobType::ExtractCompress => extract_compress(store, client, &memory).await,
         JobType::ComputeEdges => unreachable!("compute_edges is not an LLM job"),
     }
+}
+
+/// Caveman-only fallback for a `ExtractCompress` job when no LLM client is
+/// configured at all — never fails the job, mirroring how compression
+/// degrades gracefully rather than blocking on enrichment availability.
+pub(crate) fn compress_caveman_fallback(store: &mut Store, memory_id: &str) -> Result<()> {
+    let Some(m) = store.get_memory(memory_id)? else {
+        return Ok(());
+    };
+    if m.content.len() < SUMMARIZE_MIN_CHARS {
+        return Ok(());
+    }
+    let compressed = crate::compress::compress(&m.content);
+    store.set_compressed_content(&m.id, &compressed, "caveman")?;
+    tracing::warn!(
+        memory_id = %m.id,
+        "semantic compression unavailable (no LLM configured); used caveman fallback"
+    );
+    Ok(())
 }
 
 async fn summarize(store: &mut Store, client: &LlmClient, m: &crate::model::Memory) -> Result<()> {
@@ -345,6 +366,33 @@ async fn summarize(store: &mut Store, client: &LlmClient, m: &crate::model::Memo
     }
     store.merge_metadata(&m.id, &serde_json::json!({ "summary": summary }))?;
     debug!(memory_id = %m.id, "summary stored");
+    Ok(())
+}
+
+/// Token-reduced retrievable rewrite, cached for context injection only.
+/// Unlike `summarize` (lossy, display-only), this must preserve everything
+/// needed to find the memory again — recall/FTS/vector search never read it
+/// (see `Store::get_compressed_content`).
+async fn extract_compress(store: &mut Store, client: &LlmClient, m: &crate::model::Memory) -> Result<()> {
+    if m.content.len() < SUMMARIZE_MIN_CHARS {
+        return Ok(()); // nothing worth compressing
+    }
+    let raw = client
+        .complete(
+            "Rewrite the text as densely as possible. Preserve every fact, identifier, and \
+             detail needed to find it again via search. No commentary, no preamble, no \
+             summary framing. Output only the rewritten text: the shortest version that loses \
+             no retrievable information.",
+            &m.content,
+        )
+        .await?;
+    let extracted = raw.trim();
+    if extracted.is_empty() {
+        anyhow::bail!("empty extract_compress reply");
+    }
+    let compressed = crate::compress::compress(extracted);
+    store.set_compressed_content(&m.id, &compressed, "semantic")?;
+    debug!(memory_id = %m.id, "semantic compression stored");
     Ok(())
 }
 
