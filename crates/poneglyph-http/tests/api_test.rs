@@ -628,6 +628,19 @@ async fn codegraph_endpoint_returns_full_graph_with_no_focus() {
 }
 
 #[tokio::test]
+async fn codegraph_endpoint_limit_caps_node_count() {
+    let (state, store) = open_state();
+    seed_codegraph(&store.lock().unwrap());
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/codegraph?limit=1")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["nodes"].as_array().unwrap().len(), 1);
+    // No edges since the capped single node can't have both endpoints in view.
+    assert_eq!(body["edges"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn codegraph_endpoint_focus_returns_blast_radius_subset() {
     let (state, store) = open_state();
     seed_codegraph(&store.lock().unwrap());

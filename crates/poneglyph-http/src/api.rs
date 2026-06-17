@@ -239,6 +239,7 @@ pub struct CodegraphQuery {
     /// File path (relative to the graph root) or symbol name to center on.
     pub focus: Option<String>,
     pub depth: Option<usize>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -260,16 +261,16 @@ pub async fn codegraph_graph(
             let mut nodes = report.root;
             nodes.extend(report.dependents.into_iter().map(|d| d.node));
             nodes.extend(report.tests);
-            let ids: std::collections::HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
-            let edges = store.cg_all_edges()?.into_iter().filter(|e| ids.contains(e.src_id.as_str()) && ids.contains(e.dst_id.as_str())).collect();
+            let id_vec: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
+            let edges = store.cg_edges_for_nodes(&id_vec)?;
             (nodes, edges)
         }
         None => {
-            let mut nodes = Vec::new();
-            for file in store.cg_all_files()? {
-                nodes.extend(store.cg_nodes_in_file(&file.path)?);
-            }
-            (nodes, store.cg_all_edges()?)
+            let limit = q.limit.unwrap_or(500).clamp(1, 2000);
+            let nodes = store.cg_all_nodes(Some(limit))?;
+            let id_vec: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
+            let edges = store.cg_edges_for_nodes(&id_vec)?;
+            (nodes, edges)
         }
     };
 

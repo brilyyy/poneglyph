@@ -79,7 +79,7 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
-  codegraph: (params: { focus?: string; depth?: number }) =>
+  codegraph: (params: { focus?: string; depth?: number; limit?: number }) =>
     request<CodegraphResponse>(`/api/codegraph${qs(params)}`),
 
   codegraphStats: () => request<CodegraphStats>('/api/codegraph/stats'),

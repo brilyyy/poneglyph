@@ -1188,6 +1188,20 @@ impl Store {
         }
     }
 
+    /// All nodes across every file in one query — the no-focus dashboard
+    /// path used to loop `cg_nodes_in_file` once per `cg_all_files` entry
+    /// (N+1); `cg_nodes.file_path` already denormalizes the path so a plain
+    /// `SELECT` is all that's needed.
+    pub fn cg_all_nodes(&self, limit: Option<usize>) -> Result<Vec<CgNode>> {
+        let sql = match limit {
+            Some(n) => format!("SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes LIMIT {n}"),
+            None => "SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes".to_string(),
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let nodes = stmt.query_map([], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
     pub fn cg_all_files(&self) -> Result<Vec<CgFile>> {
         let mut stmt = self.conn.prepare("SELECT path, language, content_hash FROM cg_files")?;
         let files = stmt
@@ -1297,6 +1311,34 @@ impl Store {
         )?;
         let nodes = stmt.query_map(params![node_id, kind.to_string()], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
         Ok(nodes)
+    }
+
+    /// Edges with both endpoints in `ids` — used by the focus/blast-radius
+    /// dashboard path so it never has to load every edge in the DB just to
+    /// filter most of them out in memory.
+    pub fn cg_edges_for_nodes(&self, ids: &[String]) -> Result<Vec<CgEdge>> {
+        use std::collections::HashSet;
+        let id_set: HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let mut edges = Vec::new();
+        for chunk in ids.chunks(SQL_IN_CHUNK) {
+            let ph: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+            let sql = format!("SELECT src_id, dst_id, kind FROM cg_edges WHERE src_id IN ({})", ph.join(", "));
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let found = stmt
+                .query_map(params_refs.as_slice(), |row| {
+                    let kind: String = row.get(2)?;
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, kind))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (src_id, dst_id, kind) in found {
+                if id_set.contains(dst_id.as_str()) {
+                    edges.push(CgEdge { src_id, dst_id, kind: kind.parse().map_err(|e: anyhow::Error| anyhow::anyhow!(e))? });
+                }
+            }
+        }
+        Ok(edges)
     }
 
     pub fn cg_all_edges(&self) -> Result<Vec<CgEdge>> {
@@ -1845,5 +1887,42 @@ mod tests {
         let (nodes, edges) = result.unwrap();
         assert!(nodes.is_empty());
         assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn cg_all_nodes_returns_nodes_across_files() {
+        let store = test_store();
+        store.cg_upsert_file(&CgFile { path: "a.rs".into(), language: "rust".into(), content_hash: "h1".into() }).unwrap();
+        store.cg_upsert_file(&CgFile { path: "b.rs".into(), language: "rust".into(), content_hash: "h2".into() }).unwrap();
+        store
+            .cg_insert_node(&CgNode { id: "a#1:a".into(), file_path: "a.rs".into(), kind: CgNodeKind::Function, name: "a".into(), start_line: 1, end_line: 1 })
+            .unwrap();
+        store
+            .cg_insert_node(&CgNode { id: "b#1:b".into(), file_path: "b.rs".into(), kind: CgNodeKind::Function, name: "b".into(), start_line: 1, end_line: 1 })
+            .unwrap();
+
+        let nodes = store.cg_all_nodes(None).unwrap();
+        assert_eq!(nodes.len(), 2);
+
+        let capped = store.cg_all_nodes(Some(1)).unwrap();
+        assert_eq!(capped.len(), 1);
+    }
+
+    #[test]
+    fn cg_edges_for_nodes_excludes_edges_with_endpoint_outside_set() {
+        let store = test_store();
+        store.cg_upsert_file(&CgFile { path: "a.rs".into(), language: "rust".into(), content_hash: "h1".into() }).unwrap();
+        for (id, name) in [("a#1:a", "a"), ("a#2:b", "b"), ("a#3:c", "c")] {
+            store
+                .cg_insert_node(&CgNode { id: id.into(), file_path: "a.rs".into(), kind: CgNodeKind::Function, name: name.into(), start_line: 1, end_line: 1 })
+                .unwrap();
+        }
+        store.cg_insert_edge(&CgEdge { src_id: "a#1:a".into(), dst_id: "a#2:b".into(), kind: CgEdgeKind::Calls }).unwrap();
+        store.cg_insert_edge(&CgEdge { src_id: "a#1:a".into(), dst_id: "a#3:c".into(), kind: CgEdgeKind::Calls }).unwrap();
+
+        // Only a and b are "in view" — the edge to c must be excluded.
+        let edges = store.cg_edges_for_nodes(&["a#1:a".to_string(), "a#2:b".to_string()]).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].dst_id, "a#2:b");
     }
 }

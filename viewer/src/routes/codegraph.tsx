@@ -73,7 +73,7 @@ function CodegraphPage() {
 
   const initial = useQuery({
     queryKey: ['codegraph', focus ?? 'all'],
-    queryFn: () => (focus ? api.codegraph({ focus, depth: 2 }) : api.codegraph({})),
+    queryFn: () => (focus ? api.codegraph({ focus, depth: 2 }) : api.codegraph({ limit: 500 })),
   })
 
   useEffect(() => {
