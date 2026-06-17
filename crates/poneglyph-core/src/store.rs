@@ -7,7 +7,7 @@ use tracing::info;
 use uuid::Uuid;
 use crate::model::*;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Max ids per SQL `IN (...)` list — stays under SQLite's default 999-param limit.
 const SQL_IN_CHUNK: usize = 900;
@@ -103,6 +103,26 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 "#;
 
+const DDL_V2: &str = r#"
+-- Schema decoy columns
+ALTER TABLE memories ADD COLUMN is_decoy    INTEGER DEFAULT 0;
+ALTER TABLE memories ADD COLUMN tier        TEXT DEFAULT 'hot';
+ALTER TABLE memories ADD COLUMN strength    REAL DEFAULT 1.0;
+ALTER TABLE memories ADD COLUMN cold_path   TEXT;
+
+-- Decoy → child relationships (schema consolidation)
+CREATE TABLE IF NOT EXISTS decoy_children (
+    decoy_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    child_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    PRIMARY KEY (decoy_id, child_id)
+);
+CREATE INDEX IF NOT EXISTS idx_dc_child ON decoy_children(child_id);
+
+CREATE INDEX IF NOT EXISTS idx_mem_tier     ON memories(tier);
+CREATE INDEX IF NOT EXISTS idx_mem_strength ON memories(strength);
+CREATE INDEX IF NOT EXISTS idx_mem_decoy    ON memories(is_decoy);
+"#;
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -156,6 +176,15 @@ impl Store {
                 [],
             )?;
             info!(version = 1, "schema migrated");
+        }
+
+        if version < 2 {
+            self.conn.execute_batch(DDL_V2).context("DDL v2 failed")?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '2')",
+                [],
+            )?;
+            info!(version = 2, "schema migrated");
         }
 
         Ok(())
@@ -275,8 +304,8 @@ impl Store {
         let meta_str = metadata.map(|v| serde_json::to_string(v)).transpose()?;
 
         self.conn.execute(
-            "INSERT INTO memories (id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, access_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
+            "INSERT INTO memories (id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, access_count, is_decoy, tier, strength, cold_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 'hot', 1.0, NULL)",
             params![id, content, memory_type.to_string(), importance, project_id, source.to_string(), meta_str, now, now],
         )?;
 
@@ -292,12 +321,17 @@ impl Store {
             updated_at: chrono::Utc::now(),
             accessed_at: None,
             access_count: 0,
+            is_decoy: false,
+            tier: Tier::Hot,
+            strength: 1.0,
+            cold_path: None,
         })
     }
 
     pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
         let result = self.conn.query_row(
-            "SELECT id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count
+            "SELECT id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count,
+                    is_decoy, tier, strength, cold_path
              FROM memories WHERE id = ?1",
             params![id],
             |row| row_to_memory(row),
@@ -342,7 +376,8 @@ impl Store {
         };
 
         let query_sql = format!(
-            "SELECT id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count
+            "SELECT id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count,
+                    is_decoy, tier, strength, cold_path
              FROM memories {where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?"
         );
         values.push(Box::new(limit as i64));
@@ -435,6 +470,247 @@ impl Store {
     }
 
     // -----------------------------------------------------------------------
+    // Decoy / Schema operations
+    // -----------------------------------------------------------------------
+
+    /// Create a schema decoy memory (is_decoy=1, tier=hot).
+    pub fn create_decoy(
+        &self,
+        content: &str,
+        importance: f64,
+        project_id: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<Memory> {
+        let id = Uuid::now_v7().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let meta_str = metadata.map(|v| serde_json::to_string(v)).transpose()?;
+
+        self.conn.execute(
+            "INSERT INTO memories (id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, access_count, is_decoy, tier, strength, cold_path)
+             VALUES (?1, ?2, 'semantic', ?3, ?4, 'passive', ?5, ?6, ?7, 0, 1, 'hot', 1.0, NULL)",
+            params![id, content, importance, project_id, meta_str, now, now],
+        )?;
+
+        Ok(Memory {
+            id,
+            content: content.to_string(),
+            memory_type: MemoryType::Semantic,
+            importance,
+            project_id: project_id.map(String::from),
+            source: Source::Passive,
+            metadata: metadata.cloned(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            accessed_at: None,
+            access_count: 0,
+            is_decoy: true,
+            tier: Tier::Hot,
+            strength: 1.0,
+            cold_path: None,
+        })
+    }
+
+    /// Link a child memory to a decoy.
+    pub fn link_decoy_child(&self, decoy_id: &str, child_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO decoy_children (decoy_id, child_id) VALUES (?1, ?2)",
+            params![decoy_id, child_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get all children of a decoy.
+    pub fn get_decoy_children(&self, decoy_id: &str) -> Result<Vec<Memory>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.content, m.memory_type, m.importance, m.project_id, m.source, m.metadata,
+                    m.created_at, m.updated_at, m.accessed_at, m.access_count,
+                    m.is_decoy, m.tier, m.strength, m.cold_path
+             FROM memories m
+             INNER JOIN decoy_children dc ON m.id = dc.child_id
+             WHERE dc.decoy_id = ?1",
+        )?;
+        let memories = stmt.query_map(params![decoy_id], |row| row_to_memory(row))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(memories)
+    }
+
+    /// Get the decoy that owns a given child (if any).
+    pub fn get_child_decoy(&self, child_id: &str) -> Result<Option<Memory>> {
+        let result = self.conn.query_row(
+            "SELECT m.id, m.content, m.memory_type, m.importance, m.project_id, m.source, m.metadata,
+                    m.created_at, m.updated_at, m.accessed_at, m.access_count,
+                    m.is_decoy, m.tier, m.strength, m.cold_path
+             FROM memories m
+             INNER JOIN decoy_children dc ON m.id = dc.decoy_id
+             WHERE dc.child_id = ?1",
+            params![child_id],
+            |row| row_to_memory(row),
+        );
+        match result {
+            Ok(m) => Ok(Some(m)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Mark a memory as consolidated (child of a decoy). Sets tier=warm.
+    pub fn mark_consolidated(&self, memory_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE memories SET tier = 'warm', updated_at = ?1 WHERE id = ?2",
+            params![chrono::Utc::now().to_rfc3339(), memory_id],
+        )?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Strength / Decay operations
+    // -----------------------------------------------------------------------
+
+    /// Compute Ebbinghaus strength for a memory based on access pattern.
+    /// strength(t) = e^(-t / stability), stability = 1 + ln(1 + access_count) * recency_boost
+    pub fn compute_strength(&self, memory_id: &str) -> Result<f64> {
+        let row = self.conn.query_row(
+            "SELECT created_at, accessed_at, access_count FROM memories WHERE id = ?1",
+            params![memory_id],
+            |r| {
+                let created: String = r.get(0)?;
+                let accessed: Option<String> = r.get(1)?;
+                let access_count: i64 = r.get(2)?;
+                Ok((created, accessed, access_count))
+            },
+        );
+
+        let (created_str, accessed_str, access_count) = match row {
+            Ok(r) => r,
+            Err(_) => return Ok(1.0),
+        };
+
+        let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+
+        let last_access = accessed_str
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or(created_at);
+
+        let now = chrono::Utc::now();
+        let age_days = (now - created_at).num_seconds() as f64 / 86400.0;
+        let days_since_access = (now - last_access).num_seconds() as f64 / 86400.0;
+
+        // Stability increases with access count and recency of access
+        let recency_boost = 1.0 / (1.0 + days_since_access / 7.0);
+        let stability = 1.0 + (1.0 + access_count as f64).ln() * recency_boost;
+
+        // Ebbinghaus forgetting curve
+        let strength = (-age_days / stability).exp();
+
+        Ok(strength.clamp(0.0, 1.0))
+    }
+
+    /// Reinforce a memory's strength on access (spaced repetition boost).
+    pub fn reinforce_strength(&self, memory_id: &str) -> Result<()> {
+        let current_strength = self.compute_strength(memory_id)?;
+        // Weak memories get bigger boost (like SM-2)
+        let boost = 0.5 * (1.0 - current_strength);
+        let new_strength = (current_strength + boost).clamp(0.0, 1.0);
+
+        self.conn.execute(
+            "UPDATE memories SET strength = ?1, updated_at = ?2 WHERE id = ?3",
+            params![new_strength, chrono::Utc::now().to_rfc3339(), memory_id],
+        )?;
+        Ok(())
+    }
+
+    /// Update strength for all memories (called by decay worker).
+    pub fn update_all_strengths(&self) -> Result<i64> {
+        let ids: Vec<String> = {
+            let mut stmt = self.conn.prepare("SELECT id FROM memories WHERE is_decoy = 0")?;
+            stmt.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+
+        let mut updated = 0;
+        for id in &ids {
+            let strength = self.compute_strength(id)?;
+            self.conn.execute(
+                "UPDATE memories SET strength = ?1 WHERE id = ?2",
+                params![strength, id],
+            )?;
+            updated += 1;
+        }
+
+        // Also compute decoy strength as max of children
+        let decoy_ids: Vec<String> = {
+            let mut stmt = self.conn.prepare("SELECT id FROM memories WHERE is_decoy = 1")?;
+            stmt.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+
+        for did in &decoy_ids {
+            let max_strength: f64 = self.conn.query_row(
+                "SELECT COALESCE(MAX(m.strength), 0.0)
+                 FROM memories m
+                 INNER JOIN decoy_children dc ON m.id = dc.child_id
+                 WHERE dc.decoy_id = ?1",
+                params![did],
+                |r| r.get(0),
+            )?;
+            self.conn.execute(
+                "UPDATE memories SET strength = ?1 WHERE id = ?2",
+                params![max_strength, did],
+            )?;
+        }
+
+        Ok(updated)
+    }
+
+    /// Get memories eligible for cold storage (low strength, old, not decoys).
+    pub fn get_cold_candidates(&self, min_strength: f64, min_age_days: i64) -> Result<Vec<Memory>> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(min_age_days)).to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, memory_type, importance, project_id, source, metadata,
+                    created_at, updated_at, accessed_at, access_count,
+                    is_decoy, tier, strength, cold_path
+             FROM memories
+             WHERE is_decoy = 0
+               AND tier != 'cold'
+               AND strength < ?1
+               AND created_at < ?2
+               AND access_count < 3",
+        )?;
+        let memories = stmt.query_map(params![min_strength, cutoff], |row| row_to_memory(row))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(memories)
+    }
+
+    /// Move a memory to cold tier (update tier + cold_path, keep content for now).
+    pub fn move_to_cold(&self, memory_id: &str, cold_path: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE memories SET tier = 'cold', cold_path = ?1, updated_at = ?2 WHERE id = ?3",
+            params![cold_path, chrono::Utc::now().to_rfc3339(), memory_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get memories eligible for consolidation (low strength, same project).
+    pub fn get_consolidation_candidates(&self, project_id: &str, threshold: f64) -> Result<Vec<Memory>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, memory_type, importance, project_id, source, metadata,
+                    created_at, updated_at, accessed_at, access_count,
+                    is_decoy, tier, strength, cold_path
+             FROM memories
+             WHERE project_id = ?1
+               AND is_decoy = 0
+               AND strength < ?2
+               AND tier != 'cold'",
+        )?;
+        let memories = stmt.query_map(params![project_id, threshold], |row| row_to_memory(row))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(memories)
+    }
+
+    // -----------------------------------------------------------------------
     // Vec + FTS indexing
     // -----------------------------------------------------------------------
 
@@ -500,7 +776,9 @@ impl Store {
 
         let where_clause = conditions.join(" AND ");
         let sql = format!(
-            "SELECT id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count,
+            "SELECT id, content, memory_type, importance, project_id, source, metadata,
+                    created_at, updated_at, accessed_at, access_count,
+                    is_decoy, tier, strength, cold_path,
                     COALESCE(json_extract(metadata, '$.session_id'), json_extract(metadata, '$.extra.session_id')) AS session_key
              FROM memories WHERE {where_clause} ORDER BY created_at ASC"
         );
@@ -510,7 +788,7 @@ impl Store {
         let rows: Vec<(Memory, Option<String>)> = stmt
             .query_map(params_refs.as_slice(), |row| {
                 let mem = row_to_memory(row)?;
-                let session_key: Option<String> = row.get(11)?;
+                let session_key: Option<String> = row.get(15)?;
                 Ok((mem, session_key))
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -720,7 +998,9 @@ impl Store {
         use std::collections::HashSet;
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count
+            "SELECT id, content, memory_type, importance, project_id, source, metadata,
+                    created_at, updated_at, accessed_at, access_count,
+                    is_decoy, tier, strength, cold_path
              FROM memories ORDER BY created_at DESC LIMIT ?1",
         )?;
         let nodes: Vec<Memory> = stmt
@@ -757,7 +1037,9 @@ impl Store {
         for chunk in ids.chunks(SQL_IN_CHUNK) {
             let ph: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
             let sql = format!(
-                "SELECT id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count
+                "SELECT id, content, memory_type, importance, project_id, source, metadata,
+                        created_at, updated_at, accessed_at, access_count,
+                        is_decoy, tier, strength, cold_path
                  FROM memories WHERE id IN ({})",
                 ph.join(", ")
             );
@@ -894,6 +1176,10 @@ fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
         updated_at: parse_dt(&row.get::<_, String>(8)?),
         accessed_at: row.get::<_, Option<String>>(9)?.map(|s| parse_dt(&s)),
         access_count: row.get(10)?,
+        is_decoy: row.get::<_, Option<i64>>(11)?.unwrap_or(0) != 0,
+        tier: Tier::from_str(&row.get::<_, Option<String>>(12)?.unwrap_or_default()).unwrap_or(Tier::Hot),
+        strength: row.get::<_, Option<f64>>(13)?.unwrap_or(1.0),
+        cold_path: row.get(14)?,
     })
 }
 

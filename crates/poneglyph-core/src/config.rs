@@ -102,6 +102,66 @@ impl Default for EnrichmentConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecayConfig {
+    pub enabled: bool,
+    /// Memories with strength below this are archived to cold tier.
+    pub min_strength: f64,
+    /// Memories with strength below this are candidates for consolidation.
+    pub consolidation_threshold: f64,
+    /// Base daily decay rate for Ebbinghaus formula.
+    pub daily_decay_rate: f64,
+}
+
+impl Default for DecayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_strength: 0.1,
+            consolidation_threshold: 0.3,
+            daily_decay_rate: 0.02,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidationConfig {
+    pub enabled: bool,
+    /// How often the consolidation worker runs (in hours).
+    pub interval_hours: u64,
+    /// Minimum cluster size to create a decoy.
+    pub min_cluster_size: usize,
+    /// Cosine similarity threshold for agglomerative clustering.
+    pub similarity_threshold: f64,
+}
+
+impl Default for ConsolidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_hours: 6,
+            min_cluster_size: 2,
+            similarity_threshold: 0.75,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColdStorageConfig {
+    pub enabled: bool,
+    /// zstd compression level (1–22, higher = smaller but slower).
+    pub compress_level: i32,
+}
+
+impl Default for ColdStorageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            compress_level: 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub db_path: PathBuf,
     pub model_cache_dir: PathBuf,
@@ -111,6 +171,9 @@ pub struct Config {
     pub graph: GraphConfig,
     pub context: ContextConfig,
     pub enrichment: EnrichmentConfig,
+    pub decay: DecayConfig,
+    pub consolidation: ConsolidationConfig,
+    pub cold_storage: ColdStorageConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +295,9 @@ impl Config {
             graph: GraphConfig::default(),
             context: ContextConfig::default(),
             enrichment: EnrichmentConfig::default(),
+            decay: DecayConfig::default(),
+            consolidation: ConsolidationConfig::default(),
+            cold_storage: ColdStorageConfig::default(),
         }
     }
 
@@ -276,6 +342,10 @@ mod tests {
         assert_eq!(cfg.graph.similarity_threshold, 0.82);
         assert_eq!(cfg.graph.temporal_window_secs, 300);
         assert_eq!(cfg.context.max_tokens, 2000);
+        assert!(cfg.decay.enabled);
+        assert_eq!(cfg.decay.min_strength, 0.1);
+        assert_eq!(cfg.consolidation.similarity_threshold, 0.75);
+        assert_eq!(cfg.cold_storage.compress_level, 3);
     }
 
     #[test]

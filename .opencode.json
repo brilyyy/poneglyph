@@ -1,12 +1,5 @@
 {
   "mcpServers": {
-    "shadcn": {
-      "command": "pnpx",
-      "args": [
-        "shadcn@latest",
-        "mcp"
-      ]
-    },
     "code-review-graph": {
       "command": "uvx",
       "args": [
@@ -14,7 +7,8 @@
         "serve"
       ],
       "cwd": "/home/brily/dev/poneglyph",
-      "type": "stdio"
+      "type": "stdio",
+      "env": []
     }
   }
 }

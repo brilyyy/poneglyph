@@ -66,6 +66,14 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Consolidate similar memories into schema decoys
+    Consolidate {
+        /// Project path to consolidate (all projects if omitted)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Run decay: update strengths and archive low-strength memories
+    Decay,
     /// Show status
     Status,
 }
@@ -98,6 +106,8 @@ async fn main() -> Result<()> {
         Command::Forget { id } => cmd_forget(&config, &id),
         Command::Demo { count, db, force } => cmd_demo(&config, count, db, force).await,
         Command::Export { format } => cmd_export(&config, &format),
+        Command::Consolidate { project } => cmd_consolidate(&config, project.as_deref()).await,
+        Command::Decay => cmd_decay(&config),
         Command::Status => cmd_status(&config),
     }
 }
@@ -374,6 +384,79 @@ fn cmd_export(config: &Config, format: &str) -> Result<()> {
         }
         _ => println!("Unknown format: {format} (use json or md)"),
     }
+
+    Ok(())
+}
+
+async fn cmd_consolidate(config: &Config, project_path: Option<&str>) -> Result<()> {
+    config.ensure_dirs()?;
+    let store = Store::open(&config.db_path)?;
+    let embedder = try_embedder(config).await;
+
+    // Resolve project
+    let project_id = match project_path {
+        Some(path) => Some(poneglyph_core::project::detect_project(&store, path)?.id),
+        None => None,
+    };
+
+    if let Some(pid) = &project_id {
+        let results = poneglyph_core::consolidate::consolidate_project(
+            &store,
+            pid,
+            config,
+            embedder.as_deref(),
+        ).await?;
+
+        if results.is_empty() {
+            println!("No clusters found to consolidate.");
+        } else {
+            println!("Consolidated {} clusters:", results.len());
+            for r in &results {
+                println!("  decoy {} — {} children: {}", &r.decoy_id[..8], r.child_count, truncate(&r.summary, 60));
+            }
+        }
+    } else {
+        // Consolidate all projects
+        let projects = store.list_projects()?;
+        let mut total_consolidated = 0;
+
+        for project in &projects {
+            let results = poneglyph_core::consolidate::consolidate_project(
+                &store,
+                &project.id,
+                config,
+                embedder.as_deref(),
+            ).await?;
+
+            if !results.is_empty() {
+                println!("Project {}:", project.name);
+                for r in &results {
+                    println!("  decoy {} — {} children", &r.decoy_id[..8], r.child_count);
+                }
+                total_consolidated += results.len();
+            }
+        }
+
+        if total_consolidated == 0 {
+            println!("No clusters found to consolidate across any project.");
+        } else {
+            println!("\nTotal: {} clusters consolidated.", total_consolidated);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_decay(config: &Config) -> Result<()> {
+    config.ensure_dirs()?;
+    let store = Store::open(&config.db_path)?;
+
+    let report = poneglyph_core::consolidate::run_decay(&store, config)?;
+
+    println!("Decay report:");
+    println!("  Strengths updated: {}", report.strengths_updated);
+    println!("  Archived to cold:  {}", report.archived);
+    println!("  Pruned (very low): {}", report.pruned);
 
     Ok(())
 }

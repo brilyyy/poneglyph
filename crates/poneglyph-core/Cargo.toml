@@ -21,6 +21,7 @@ chrono          = { workspace = true }
 figment         = { workspace = true }
 directories     = { workspace = true }
 candle-core     = { workspace = true }
+zstd            = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -62,6 +62,8 @@ export const api = {
     limit?: number
     offset?: number
     gap_secs?: number
+    memory_type?: string
+    source?: string
   }) => request<TimelineResponse>(`/api/timeline${qs(params)}`),
 
   getSettings: () => request<Record<string, any>>('/api/settings'),

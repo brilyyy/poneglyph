@@ -123,12 +123,13 @@ pub fn detect_project(store: &Store, project_path: &str) -> Result<Project> {
     store.upsert_project(project_path, &name, remote.as_deref())
 }
 
-/// Ranking score per PRD §8.10: importance × recency × access.
+/// Ranking score per PRD §8.10: importance × recency × access × strength.
 fn context_score(m: &Memory) -> f64 {
     let age_days = (Utc::now() - m.created_at).num_seconds().max(0) as f64 / 86400.0;
     let recency = 1.0 / (1.0 + age_days / 7.0);
     let access = 1.0 + (1.0 + m.access_count as f64).ln();
-    (0.1 + m.importance) * recency * access
+    let strength_factor = 0.1 + 0.9 * m.strength;
+    (0.1 + m.importance) * recency * access * strength_factor
 }
 
 /// Assemble the injection string for a project, truncated to `max_tokens`.

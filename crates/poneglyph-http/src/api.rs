@@ -267,6 +267,8 @@ pub struct TimelineQuery {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub gap_secs: Option<i64>,
+    pub memory_type: Option<String>,
+    pub source: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -278,6 +280,10 @@ pub struct TimelineSession {
     pub ended_at: String,
     pub memory_count: usize,
     pub memories: Vec<Memory>,
+    pub duration_secs: i64,
+    pub type_counts: std::collections::HashMap<String, usize>,
+    pub source_counts: std::collections::HashMap<String, usize>,
+    pub avg_strength: f64,
 }
 
 #[derive(Serialize)]
@@ -312,12 +318,36 @@ pub async fn timeline(
 
     let (groups, total) = store.list_sessions(project_id.as_deref(), gap_secs, limit, offset)?;
 
-    let sessions = groups
+    let mut sessions: Vec<TimelineSession> = groups
         .into_iter()
         .map(|g| {
             let memory_count = g.memories.len();
             let project_name = g.project_id.as_deref()
                 .and_then(|pid| project_names.get(pid).map(|s| s.to_string()));
+
+            // Compute session stats
+            let started = chrono::DateTime::parse_from_rfc3339(&g.started_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+            let ended = chrono::DateTime::parse_from_rfc3339(&g.ended_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+            let duration_secs = (ended - started).num_seconds().max(0);
+
+            let mut type_counts = std::collections::HashMap::new();
+            let mut source_counts = std::collections::HashMap::new();
+            let mut total_strength = 0.0;
+            for m in &g.memories {
+                *type_counts.entry(m.memory_type.to_string()).or_insert(0) += 1;
+                *source_counts.entry(m.source.to_string()).or_insert(0) += 1;
+                total_strength += m.strength;
+            }
+            let avg_strength = if memory_count > 0 {
+                total_strength / memory_count as f64
+            } else {
+                1.0
+            };
+
             TimelineSession {
                 session_id: g.session_id,
                 project_id: g.project_id,
@@ -326,9 +356,33 @@ pub async fn timeline(
                 ended_at: g.ended_at,
                 memory_count,
                 memories: g.memories,
+                duration_secs,
+                type_counts,
+                source_counts,
+                avg_strength,
             }
         })
         .collect();
+
+    // Apply memory type filter
+    if let Some(mt) = &q.memory_type {
+        let mt_str = mt.as_str();
+        for session in &mut sessions {
+            session.memories.retain(|m| m.memory_type.to_string() == mt_str);
+            session.memory_count = session.memories.len();
+        }
+        sessions.retain(|s| !s.memories.is_empty());
+    }
+
+    // Apply source filter
+    if let Some(src) = &q.source {
+        let src_str = src.as_str();
+        for session in &mut sessions {
+            session.memories.retain(|m| m.source.to_string() == src_str);
+            session.memory_count = session.memories.len();
+        }
+        sessions.retain(|s| !s.memories.is_empty());
+    }
 
     Ok(Json(TimelineResponse { sessions, total }))
 }

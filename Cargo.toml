@@ -40,6 +40,7 @@ candle-core = { version = "=0.9.1" }
 rusqlite        = { version = "0.32", features = ["bundled"] }
 sqlite-vec      = { version = "0.1" }
 deadpool-sqlite = { version = "0.9" }
+zstd            = { version = "0.13" }
 
 # In-memory cache
 moka = { version = "0.12", features = ["future"] }

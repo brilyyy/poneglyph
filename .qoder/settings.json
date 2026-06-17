@@ -2,15 +2,6 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Task(Create|Update)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 scripts/sync-todo.py"
-          }
-        ]
-      },
-      {
         "matcher": "Edit|Write|Bash",
         "hooks": [
           {

@@ -24,6 +24,10 @@ export interface Memory {
   updated_at: string
   accessed_at: string | null
   access_count: number
+  is_decoy: boolean
+  tier: 'hot' | 'warm' | 'cold'
+  strength: number
+  cold_path: string | null
 }
 
 export interface Edge {
@@ -106,6 +110,10 @@ export interface TimelineSession {
   ended_at: string
   memory_count: number
   memories: Memory[]
+  duration_secs: number
+  type_counts: Partial<Record<MemoryType, number>>
+  source_counts: Partial<Record<Source, number>>
+  avg_strength: number
 }
 
 export interface TimelineResponse {

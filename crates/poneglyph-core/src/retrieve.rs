@@ -39,8 +39,14 @@ fn recency_factor(created_at: DateTime<Utc>) -> f64 {
     (1.0 - days / 30.0).max(0.0)
 }
 
-fn final_score(rrf_score: f64, importance: f64, created_at: DateTime<Utc>) -> f64 {
-    rrf_score * (1.0 + 0.1 * importance + 0.05 * recency_factor(created_at))
+fn strength_factor(strength: f64) -> f64 {
+    // Ebbinghaus-inspired: memories with low strength get penalized
+    // strength=1.0 → 1.0, strength=0.3 → 0.5, strength=0.0 → 0.1
+    0.1 + 0.9 * strength
+}
+
+fn final_score(rrf_score: f64, importance: f64, created_at: DateTime<Utc>, strength: f64) -> f64 {
+    rrf_score * (1.0 + 0.1 * importance + 0.05 * recency_factor(created_at)) * strength_factor(strength)
 }
 
 fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
@@ -76,10 +82,14 @@ fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
                 .ok()
         }),
         access_count,
+        is_decoy: row.get::<_, Option<i64>>(11)?.unwrap_or(0) != 0,
+        tier: crate::model::Tier::from_str(&row.get::<_, Option<String>>(12)?.unwrap_or_default()).unwrap_or(crate::model::Tier::Hot),
+        strength: row.get::<_, Option<f64>>(13)?.unwrap_or(1.0),
+        cold_path: row.get(14)?,
     })
 }
 
-const MEMORY_COLS: &str = "id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count";
+const MEMORY_COLS: &str = "id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, accessed_at, access_count, is_decoy, tier, strength, cold_path";
 
 fn build_filter_where(filters: &RecallFilters) -> (String, Vec<String>) {
     let mut conditions = Vec::new();
@@ -329,7 +339,7 @@ pub fn recall(
     for id in &all_ids {
         if let Some(memory) = memory_map.get(id) {
             let rrf_score = rrf_scores[id];
-            let score = final_score(rrf_score, memory.importance, memory.created_at);
+            let score = final_score(rrf_score, memory.importance, memory.created_at, memory.strength);
             results.push(RecallResult {
                 memory: memory.clone(),
                 score,
@@ -418,8 +428,16 @@ mod tests {
     #[test]
     fn final_score_calculation() {
         let now = Utc::now();
-        let score = final_score(0.1, 0.8, now);
-        let expected = 0.1 * (1.0 + 0.08 + 0.05);
+        let score = final_score(0.1, 0.8, now, 1.0);
+        let expected = 0.1 * (1.0 + 0.08 + 0.05) * 1.0;
         assert!((score - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn strength_factor_penalizes_weak() {
+        let strong = strength_factor(1.0);
+        let weak = strength_factor(0.2);
+        assert!(strong > weak);
+        assert!((strong - 1.0).abs() < 0.01);
     }
 }

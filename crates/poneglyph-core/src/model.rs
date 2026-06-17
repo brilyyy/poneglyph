@@ -192,6 +192,46 @@ impl std::str::FromStr for JobStatus {
 // Core structs
 // ---------------------------------------------------------------------------
 
+/// Storage tier — determines where content lives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tier {
+    /// Full content in DB, searchable via dense + FTS.
+    Hot,
+    /// Full content in DB, accessed occasionally.
+    Warm,
+    /// Content compressed to .zst file, lazy-loaded on demand.
+    Cold,
+}
+
+impl Default for Tier {
+    fn default() -> Self {
+        Self::Hot
+    }
+}
+
+impl std::fmt::Display for Tier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hot => write!(f, "hot"),
+            Self::Warm => write!(f, "warm"),
+            Self::Cold => write!(f, "cold"),
+        }
+    }
+}
+
+impl std::str::FromStr for Tier {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "hot" => Ok(Self::Hot),
+            "warm" => Ok(Self::Warm),
+            "cold" => Ok(Self::Cold),
+            _ => Err(anyhow::anyhow!("unknown tier: {s}")),
+        }
+    }
+}
+
 /// A single unit of persistent memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
@@ -210,6 +250,14 @@ pub struct Memory {
     pub updated_at: DateTime<Utc>,
     pub accessed_at: Option<DateTime<Utc>>,
     pub access_count: i64,
+    /// True if this is a schema decoy (consolidated cluster summary).
+    pub is_decoy: bool,
+    /// Storage tier: hot / warm / cold.
+    pub tier: Tier,
+    /// Ebbinghaus memory strength 0.0–1.0. Decays over time, reinforced on access.
+    pub strength: f64,
+    /// Path to compressed .zst file when tier=cold, None otherwise.
+    pub cold_path: Option<String>,
 }
 
 /// A directed edge in the knowledge graph.
