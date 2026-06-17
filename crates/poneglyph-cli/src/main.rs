@@ -1,4 +1,5 @@
 mod demo;
+mod detect;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -115,13 +116,15 @@ async fn main() -> Result<()> {
 fn cmd_init(config: &Config) -> Result<()> {
     config.ensure_dirs().context("failed to create directories")?;
 
-    // Create default config if it doesn't exist
+    // Create default config if it doesn't exist: every key present but
+    // commented, except values resolved by local-provider detection.
     let config_path = Config::default_config_path();
     if !config_path.exists() {
         if let Some(dir) = config_path.parent() {
             std::fs::create_dir_all(dir).context("failed to create config directory")?;
         }
-        let toml = toml::to_string_pretty(config).unwrap_or_default();
+        let detected = detect::detect_local_llm();
+        let toml = detect::render_config_template(&detected);
         std::fs::write(&config_path, toml).context("failed to write config")?;
         println!("Config created: {}", config_path.display());
     } else {
@@ -131,6 +134,14 @@ fn cmd_init(config: &Config) -> Result<()> {
     // Initialize DB
     Store::open(&config.db_path).context("failed to initialize database")?;
     println!("Database initialized: {}", config.db_path.display());
+
+    // Auto-detect and wire up installed coding agents (MCP server + hooks).
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "poneglyph".to_string());
+    let hooks_dir = Config::config_dir().join("hooks");
+    println!("\nAgent integration:");
+    for outcome in detect::run_agent_setup(&config.agents, &hooks_dir, &exe)? {
+        println!("  {:<14} {}", outcome.agent, outcome.status.as_str());
+    }
 
     Ok(())
 }
