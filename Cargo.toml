@@ -90,6 +90,15 @@ chrono = { version = "0.4", features = ["serde"] }
 # Graph algorithms (viewer only, optional)
 petgraph = { version = "0.6" }
 
+# Code knowledge graph (Tree-sitter)
+tree-sitter            = { version = "0.25" }
+tree-sitter-rust       = { version = "0.24" }
+tree-sitter-typescript = { version = "0.23" }
+tree-sitter-javascript = { version = "0.23" }
+tree-sitter-python     = { version = "0.23" }
+tree-sitter-go         = { version = "0.23" }
+notify                 = { version = "6" }
+
 # Internal crates
 poneglyph-core = { path = "crates/poneglyph-core" }
 poneglyph-mcp  = { path = "crates/poneglyph-mcp" }

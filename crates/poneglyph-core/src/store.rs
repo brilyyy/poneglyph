@@ -7,7 +7,7 @@ use tracing::info;
 use uuid::Uuid;
 use crate::model::*;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Max ids per SQL `IN (...)` list — stays under SQLite's default 999-param limit.
 const SQL_IN_CHUNK: usize = 900;
@@ -123,6 +123,40 @@ CREATE INDEX IF NOT EXISTS idx_mem_strength ON memories(strength);
 CREATE INDEX IF NOT EXISTS idx_mem_decoy    ON memories(is_decoy);
 "#;
 
+// Code knowledge graph (Tree-sitter). Distinct from the `edges` table above
+// (memory-linkage similarity/temporal/tag edges).
+const DDL_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS cg_files (
+    path          TEXT PRIMARY KEY,
+    language      TEXT NOT NULL,
+    content_hash  TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cg_nodes (
+    id          TEXT PRIMARY KEY,
+    file_path   TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    start_line  INTEGER NOT NULL,
+    end_line    INTEGER NOT NULL,
+    FOREIGN KEY (file_path) REFERENCES cg_files(path) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_cg_nodes_file ON cg_nodes(file_path);
+CREATE INDEX IF NOT EXISTS idx_cg_nodes_name ON cg_nodes(name);
+
+CREATE TABLE IF NOT EXISTS cg_edges (
+    src_id  TEXT NOT NULL,
+    dst_id  TEXT NOT NULL,
+    kind    TEXT NOT NULL,
+    PRIMARY KEY (src_id, dst_id, kind),
+    FOREIGN KEY (src_id) REFERENCES cg_nodes(id) ON DELETE CASCADE,
+    FOREIGN KEY (dst_id) REFERENCES cg_nodes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_cg_edges_src ON cg_edges(src_id);
+CREATE INDEX IF NOT EXISTS idx_cg_edges_dst ON cg_edges(dst_id);
+"#;
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -185,6 +219,15 @@ impl Store {
                 [],
             )?;
             info!(version = 2, "schema migrated");
+        }
+
+        if version < 3 {
+            self.conn.execute_batch(DDL_V3).context("DDL v3 failed")?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '3')",
+                [],
+            )?;
+            info!(version = 3, "schema migrated");
         }
 
         Ok(())
@@ -1130,6 +1173,170 @@ impl Store {
 
         Ok(Stats { memory_count, edge_count, project_count, pending_jobs: job_count, by_type })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Code knowledge graph (Tree-sitter)
+// ---------------------------------------------------------------------------
+
+impl Store {
+    pub fn cg_file_hash(&self, path: &str) -> Result<Option<String>> {
+        match self.conn.query_row("SELECT content_hash FROM cg_files WHERE path = ?1", params![path], |r| r.get(0)) {
+            Ok(hash) => Ok(Some(hash)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn cg_all_files(&self) -> Result<Vec<CgFile>> {
+        let mut stmt = self.conn.prepare("SELECT path, language, content_hash FROM cg_files")?;
+        let files = stmt
+            .query_map([], |r| Ok(CgFile { path: r.get(0)?, language: r.get(1)?, content_hash: r.get(2)? }))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(files)
+    }
+
+    /// Remove a file's nodes/edges (cascade) and its `cg_files` row, e.g.
+    /// before re-inserting fresh parse results or when the file is deleted.
+    pub fn cg_clear_file(&self, path: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM cg_files WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+
+    pub fn cg_upsert_file(&self, file: &CgFile) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO cg_files (path, language, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET language = ?2, content_hash = ?3, updated_at = ?4",
+            params![file.path, file.language, file.content_hash, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn cg_insert_node(&self, node: &CgNode) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO cg_nodes (id, file_path, kind, name, start_line, end_line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![node.id, node.file_path, node.kind.to_string(), node.name, node.start_line, node.end_line],
+        )?;
+        Ok(())
+    }
+
+    pub fn cg_insert_edge(&self, edge: &CgEdge) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO cg_edges (src_id, dst_id, kind) VALUES (?1, ?2, ?3)",
+            params![edge.src_id, edge.dst_id, edge.kind.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn cg_node(&self, id: &str) -> Result<Option<CgNode>> {
+        let result = self.conn.query_row(
+            "SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes WHERE id = ?1",
+            params![id],
+            row_to_cg_node,
+        );
+        match result {
+            Ok(n) => Ok(Some(n)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// All nodes with an exact name match, across every file. Used to
+    /// resolve call/test references found during parsing.
+    pub fn cg_nodes_by_name(&self, name: &str, kinds: &[CgNodeKind]) -> Result<Vec<CgNode>> {
+        let kind_list = kinds.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes WHERE name = ?1 AND kind IN ({kind_list})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let nodes = stmt.query_map(params![name], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    pub fn cg_nodes_in_file(&self, path: &str) -> Result<Vec<CgNode>> {
+        let mut stmt =
+            self.conn.prepare("SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes WHERE file_path = ?1")?;
+        let nodes = stmt.query_map(params![path], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    /// Keyword search by substring, case-insensitive.
+    pub fn cg_search_by_name(&self, keyword: &str, limit: usize) -> Result<Vec<CgNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes
+             WHERE name LIKE ?1 ESCAPE '\\' ORDER BY name LIMIT ?2",
+        )?;
+        let pattern = format!("%{}%", escape_like(keyword));
+        let nodes = stmt.query_map(params![pattern, limit as i64], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    /// Nodes reached by edges of `kind` pointing *into* `node_id` (e.g. who
+    /// calls this, who imports this, who tests this).
+    pub fn cg_edges_into(&self, node_id: &str, kind: CgEdgeKind) -> Result<Vec<CgNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, n.file_path, n.kind, n.name, n.start_line, n.end_line
+             FROM cg_edges e JOIN cg_nodes n ON n.id = e.src_id
+             WHERE e.dst_id = ?1 AND e.kind = ?2",
+        )?;
+        let nodes = stmt.query_map(params![node_id, kind.to_string()], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    /// Nodes reached by edges of `kind` pointing *out of* `node_id` (e.g.
+    /// what this calls).
+    pub fn cg_edges_out_of(&self, node_id: &str, kind: CgEdgeKind) -> Result<Vec<CgNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, n.file_path, n.kind, n.name, n.start_line, n.end_line
+             FROM cg_edges e JOIN cg_nodes n ON n.id = e.dst_id
+             WHERE e.src_id = ?1 AND e.kind = ?2",
+        )?;
+        let nodes = stmt.query_map(params![node_id, kind.to_string()], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    pub fn cg_all_edges(&self) -> Result<Vec<CgEdge>> {
+        let mut stmt = self.conn.prepare("SELECT src_id, dst_id, kind FROM cg_edges")?;
+        let edges = stmt
+            .query_map([], |r| {
+                let kind: String = r.get(2)?;
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, kind))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        edges
+            .into_iter()
+            .map(|(src_id, dst_id, kind)| {
+                Ok(CgEdge { src_id, dst_id, kind: kind.parse().map_err(|e: anyhow::Error| anyhow::anyhow!(e))? })
+            })
+            .collect()
+    }
+
+    pub fn cg_stats(&self) -> Result<(i64, i64, i64)> {
+        let files: i64 = self.conn.query_row("SELECT COUNT(*) FROM cg_files", [], |r| r.get(0))?;
+        let nodes: i64 = self.conn.query_row("SELECT COUNT(*) FROM cg_nodes", [], |r| r.get(0))?;
+        let edges: i64 = self.conn.query_row("SELECT COUNT(*) FROM cg_edges", [], |r| r.get(0))?;
+        Ok((files, nodes, edges))
+    }
+}
+
+fn row_to_cg_node(row: &rusqlite::Row) -> rusqlite::Result<CgNode> {
+    let kind: String = row.get(2)?;
+    Ok(CgNode {
+        id: row.get(0)?,
+        file_path: row.get(1)?,
+        kind: kind.parse().map_err(|e: anyhow::Error| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, e.into())
+        })?,
+        name: row.get(3)?,
+        start_line: row.get(4)?,
+        end_line: row.get(5)?,
+    })
+}
+
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
 // ---------------------------------------------------------------------------

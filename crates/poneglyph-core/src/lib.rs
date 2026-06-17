@@ -4,6 +4,7 @@ pub mod store;
 pub mod embed;
 pub mod retrieve;
 pub mod graph;
+pub mod codegraph;
 pub mod enrich;
 pub mod project;
 pub mod llm;
