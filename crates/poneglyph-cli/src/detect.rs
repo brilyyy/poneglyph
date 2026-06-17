@@ -14,6 +14,7 @@ const USERPROMPTSUBMIT_SH: &str = include_str!("../../../hooks/claude-code/userp
 const STOP_SH: &str = include_str!("../../../hooks/claude-code/stop.sh");
 const SESSIONSTART_SH: &str = include_str!("../../../hooks/claude-code/sessionstart.sh");
 const OPENCODE_PLUGIN_TS: &str = include_str!("../../../hooks/opencode/poneglyph.ts");
+const SKILL_MD: &str = include_str!("../../../hooks/poneglyph/SKILL.md");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupStatus {
@@ -74,8 +75,10 @@ fn setup_claude_code(enabled: bool, home: &Path, hooks_dir: &Path, exe: &str) ->
     install_hook_scripts(hooks_dir)?;
     let hooks_changed = merge_claude_code_hooks(&claude_dir.join("settings.json"), hooks_dir)?;
     let mcp_changed = merge_json_mcp_server(&home.join(".claude.json"), "mcpServers", true, exe)?;
+    let skill_changed = install_skill_file(&claude_dir.join("skills"))?;
 
-    let status = if hooks_changed || mcp_changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured };
+    let status =
+        if hooks_changed || mcp_changed || skill_changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured };
     Ok(SetupOutcome { agent: "claude-code", status })
 }
 
@@ -268,6 +271,20 @@ fn install_opencode_plugin(plugin_dir: &Path) -> Result<bool> {
     let stale = !path.exists() || std::fs::read_to_string(&path).map(|s| s != OPENCODE_PLUGIN_TS).unwrap_or(true);
     if stale {
         std::fs::write(&path, OPENCODE_PLUGIN_TS).with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(stale)
+}
+
+/// Write the bundled poneglyph skill into `skills_dir/poneglyph/SKILL.md` if
+/// missing or stale. Claude Code skills are directories, one `SKILL.md` per
+/// skill. Returns whether the file changed.
+fn install_skill_file(skills_dir: &Path) -> Result<bool> {
+    let dir = skills_dir.join("poneglyph");
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let path = dir.join("SKILL.md");
+    let stale = !path.exists() || std::fs::read_to_string(&path).map(|s| s != SKILL_MD).unwrap_or(true);
+    if stale {
+        std::fs::write(&path, SKILL_MD).with_context(|| format!("failed to write {}", path.display()))?;
     }
     Ok(stale)
 }
@@ -548,6 +565,25 @@ mod tests {
         let plugin_dir = dir.path().join("plugins");
         assert!(install_opencode_plugin(&plugin_dir).unwrap());
         assert!(!install_opencode_plugin(&plugin_dir).unwrap(), "unchanged content must be a no-op");
+    }
+
+    #[test]
+    fn install_skill_file_writes_then_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        assert!(install_skill_file(&skills_dir).unwrap());
+        assert!(skills_dir.join("poneglyph/SKILL.md").exists());
+        assert!(!install_skill_file(&skills_dir).unwrap(), "unchanged content must be a no-op");
+    }
+
+    #[test]
+    fn setup_claude_code_installs_skill_when_detected() {
+        let dir = tempdir().unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+
+        setup_claude_code(true, home, &dir.path().join("hooks"), "poneglyph").unwrap();
+        assert!(home.join(".claude/skills/poneglyph/SKILL.md").exists());
     }
 
     #[test]
