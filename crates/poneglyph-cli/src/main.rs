@@ -77,6 +77,47 @@ enum Command {
     Decay,
     /// Show status
     Status,
+    /// Code knowledge graph (Tree-sitter) — distinct from the memory graph
+    Graph {
+        #[command(subcommand)]
+        action: GraphCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphCommand {
+    /// Full build: parse every matching file under `path`
+    Init {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Incremental build: only reparse files whose content changed
+    Update {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Watch `path` and incrementally rebuild on change (debounced)
+    Watch {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Structured (callers_of:/callees_of:/imports_of:/tests_for:) or keyword query
+    Query {
+        q: String,
+    },
+    /// Recursive caller/importer/test trace from a file or symbol
+    BlastRadius {
+        target: String,
+        #[arg(long)]
+        depth: Option<usize>,
+    },
+    /// Export the graph as json, dot, or graphml
+    Export {
+        #[arg(long, default_value = "json")]
+        format: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn load_config(cli_config: &Option<PathBuf>) -> Result<Config> {
@@ -110,6 +151,7 @@ async fn main() -> Result<()> {
         Command::Consolidate { project } => cmd_consolidate(&config, project.as_deref()).await,
         Command::Decay => cmd_decay(&config),
         Command::Status => cmd_status(&config),
+        Command::Graph { action } => cmd_graph(&config, action),
     }
 }
 
@@ -497,6 +539,106 @@ fn cmd_status(config: &Config) -> Result<()> {
         println!("Note: data lives at a legacy (pre-XDG) location.");
         println!("Move it with poneglyph stopped, e.g.:");
         println!("  mv ~/Library/'Application Support'/poneglyph/poneglyph.db ~/.local/share/poneglyph/");
+    }
+
+    Ok(())
+}
+
+fn cmd_graph(config: &Config, action: GraphCommand) -> Result<()> {
+    use poneglyph_core::codegraph;
+
+    config.ensure_dirs()?;
+    let store = Store::open(&config.db_path)?;
+
+    match action {
+        GraphCommand::Init { path } => {
+            let report = codegraph::build(&store, &path, &config.graph, true)?;
+            print_build_report(&report);
+        }
+        GraphCommand::Update { path } => {
+            let report = codegraph::build(&store, &path, &config.graph, false)?;
+            print_build_report(&report);
+        }
+        GraphCommand::Watch { path } => cmd_graph_watch(&store, &path, config)?,
+        GraphCommand::Query { q } => {
+            let query = codegraph::parse_query(&q);
+            let results = codegraph::run_query(&store, &query)?;
+            if results.is_empty() {
+                println!("No matches.");
+            }
+            for n in &results {
+                println!("[{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
+            }
+        }
+        GraphCommand::BlastRadius { target, depth } => {
+            let depth = depth.unwrap_or(config.graph.blast_radius_depth);
+            let report = codegraph::blast_radius(&store, &target, depth)?;
+            if report.root.is_empty() {
+                println!("No file or symbol matching '{target}' found in the graph.");
+                return Ok(());
+            }
+            println!("Root ({} symbol(s)):", report.root.len());
+            for n in &report.root {
+                println!("  [{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
+            }
+            println!("\nDependents ({}):", report.dependents.len());
+            for d in &report.dependents {
+                println!("  depth {} [{}] {} — {}:{}", d.depth, d.node.kind, d.node.name, d.node.file_path, d.node.start_line);
+            }
+            println!("\nTests ({}):", report.tests.len());
+            for t in &report.tests {
+                println!("  {} — {}:{}", t.name, t.file_path, t.start_line);
+            }
+        }
+        GraphCommand::Export { format, out } => {
+            let rendered = match format.as_str() {
+                "json" => codegraph::export_json(&store)?,
+                "dot" => codegraph::export_dot(&store)?,
+                "graphml" => codegraph::export_graphml(&store)?,
+                other => anyhow::bail!("unknown export format '{other}' (use json, dot, or graphml)"),
+            };
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
+                    println!("Exported: {}", path.display());
+                }
+                None => println!("{rendered}"),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_build_report(report: &poneglyph_core::codegraph::BuildReport) {
+    println!(
+        "Parsed {} file(s), {} unchanged, {} removed. {} node(s), {} edge(s).",
+        report.files_parsed, report.files_unchanged, report.files_removed, report.nodes, report.edges
+    );
+}
+
+/// Blocks the calling thread, rebuilding incrementally after each debounced
+/// burst of filesystem events, until Ctrl-C.
+fn cmd_graph_watch(store: &Store, path: &std::path::Path, config: &Config) -> Result<()> {
+    use notify::{RecursiveMode, Watcher};
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(tx).context("failed to start file watcher")?;
+    watcher.watch(path, RecursiveMode::Recursive).context("failed to watch path")?;
+
+    println!("Watching {} (Ctrl-C to stop)...", path.display());
+    let debounce = std::time::Duration::from_millis(config.graph.watch_delay_ms);
+    loop {
+        // Block for the first event, then drain whatever else arrives within the debounce window.
+        if rx.recv().is_err() {
+            break;
+        }
+        while rx.recv_timeout(debounce).is_ok() {}
+
+        match poneglyph_core::codegraph::build(store, path, &config.graph, false) {
+            Ok(report) => print_build_report(&report),
+            Err(e) => tracing::warn!(error = %e, "graph update failed"),
+        }
     }
 
     Ok(())

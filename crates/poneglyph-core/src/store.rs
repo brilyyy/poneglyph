@@ -1222,12 +1222,14 @@ impl Store {
         Ok(())
     }
 
-    pub fn cg_insert_edge(&self, edge: &CgEdge) -> Result<()> {
-        self.conn.execute(
+    /// Returns whether a new row was inserted (false if this exact edge
+    /// already existed) — callers use this to report accurate edge counts.
+    pub fn cg_insert_edge(&self, edge: &CgEdge) -> Result<bool> {
+        let changed = self.conn.execute(
             "INSERT OR IGNORE INTO cg_edges (src_id, dst_id, kind) VALUES (?1, ?2, ?3)",
             params![edge.src_id, edge.dst_id, edge.kind.to_string()],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     pub fn cg_node(&self, id: &str) -> Result<Option<CgNode>> {

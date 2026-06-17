@@ -4455,6 +4455,7 @@ dependencies = [
  "clap",
  "directories",
  "figment",
+ "notify",
  "poneglyph-core",
  "poneglyph-http",
  "poneglyph-mcp",

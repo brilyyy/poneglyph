@@ -99,8 +99,9 @@ fn resolve_edges(store: &Store, file_path: &str, parsed: &ParsedFile) -> Result<
         if target.id == *caller_id {
             continue; // skip self-recursive calls — not useful for blast-radius fan-out
         }
-        store.cg_insert_edge(&CgEdge { src_id: caller_id.clone(), dst_id: target.id, kind: CgEdgeKind::Calls })?;
-        count += 1;
+        if store.cg_insert_edge(&CgEdge { src_id: caller_id.clone(), dst_id: target.id, kind: CgEdgeKind::Calls })? {
+            count += 1;
+        }
     }
 
     for (test_id, target_guess) in &parsed.tests {
@@ -108,8 +109,9 @@ fn resolve_edges(store: &Store, file_path: &str, parsed: &ParsedFile) -> Result<
         let candidates = store.cg_nodes_by_name(name, &[CgNodeKind::Function, CgNodeKind::Method])?;
         let target = candidates.iter().find(|n| n.file_path == file_path).or_else(|| candidates.first());
         let Some(target) = target else { continue };
-        store.cg_insert_edge(&CgEdge { src_id: test_id.clone(), dst_id: target.id.clone(), kind: CgEdgeKind::Tests })?;
-        count += 1;
+        if store.cg_insert_edge(&CgEdge { src_id: test_id.clone(), dst_id: target.id.clone(), kind: CgEdgeKind::Tests })? {
+            count += 1;
+        }
     }
 
     Ok(count)
