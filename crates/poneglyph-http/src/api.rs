@@ -9,8 +9,9 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use poneglyph_core::codegraph;
 use poneglyph_core::enrich;
-use poneglyph_core::model::{Edge, Memory};
+use poneglyph_core::model::{CgEdge, CgNode, Edge, Memory};
 use poneglyph_core::retrieve::RecallFilters;
 use poneglyph_core::store::Store;
 
@@ -227,6 +228,113 @@ pub async fn graph(
         None => store.graph_sample(limit)?,
     };
     Ok(Json(GraphResponse { nodes, edges }))
+}
+
+// ---------------------------------------------------------------------------
+// /api/codegraph
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct CodegraphQuery {
+    /// File path (relative to the graph root) or symbol name to center on.
+    pub focus: Option<String>,
+    pub depth: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct CodegraphResponse {
+    pub nodes: Vec<CgNode>,
+    pub edges: Vec<CgEdge>,
+}
+
+pub async fn codegraph_graph(
+    State(state): State<AppState>,
+    Query(q): Query<CodegraphQuery>,
+) -> ApiResult<CodegraphResponse> {
+    let store = state.lock_store()?;
+
+    let (nodes, edges) = match q.focus.as_deref() {
+        Some(focus) => {
+            let depth = q.depth.unwrap_or(state.config.graph.blast_radius_depth).clamp(1, 10);
+            let report = codegraph::blast_radius(&store, focus, depth)?;
+            let mut nodes = report.root;
+            nodes.extend(report.dependents.into_iter().map(|d| d.node));
+            nodes.extend(report.tests);
+            let ids: std::collections::HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+            let edges = store.cg_all_edges()?.into_iter().filter(|e| ids.contains(e.src_id.as_str()) && ids.contains(e.dst_id.as_str())).collect();
+            (nodes, edges)
+        }
+        None => {
+            let mut nodes = Vec::new();
+            for file in store.cg_all_files()? {
+                nodes.extend(store.cg_nodes_in_file(&file.path)?);
+            }
+            (nodes, store.cg_all_edges()?)
+        }
+    };
+
+    Ok(Json(CodegraphResponse { nodes, edges }))
+}
+
+pub async fn codegraph_stats(State(state): State<AppState>) -> ApiResult<Value> {
+    let store = state.lock_store()?;
+    let (files, nodes, edges) = store.cg_stats()?;
+    Ok(Json(json!({ "files": files, "nodes": nodes, "edges": edges })))
+}
+
+// ---------------------------------------------------------------------------
+// /api/token-savings — estimated prose-compression savings (PRD: caveman
+// grammar). `[memory].compression_enabled` is off by default and not yet
+// applied at rest (see core::compress), so this samples stored content and
+// runs the real compressor on demand rather than reporting a fake number.
+// ---------------------------------------------------------------------------
+
+pub async fn token_savings(State(state): State<AppState>) -> ApiResult<Value> {
+    let store = state.lock_store()?;
+    let (memories, _) = store.list_memories(None, None, 200, 0)?;
+
+    let mut original_bytes = 0usize;
+    let mut compressed_bytes = 0usize;
+    for m in &memories {
+        original_bytes += m.content.len();
+        compressed_bytes += poneglyph_core::compress::compress(&m.content).len();
+    }
+    let savings_pct =
+        if original_bytes > 0 { 100.0 * (1.0 - compressed_bytes as f64 / original_bytes as f64) } else { 0.0 };
+
+    Ok(Json(json!({
+        "sampled_memories": memories.len(),
+        "original_bytes": original_bytes,
+        "compressed_bytes": compressed_bytes,
+        "savings_pct": savings_pct,
+        "compression_enabled": state.config.memory.compression_enabled,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// /api/agents-status — wiring status for `[agents]`: config flag vs whether
+// `poneglyph init` actually found the agent installed on this machine.
+// ---------------------------------------------------------------------------
+
+fn agent_entry(enabled: bool, marker_dir: Option<std::path::PathBuf>) -> Value {
+    json!({ "enabled": enabled, "detected": marker_dir.is_some_and(|d| d.exists()) })
+}
+
+pub async fn agents_status(State(state): State<AppState>) -> ApiResult<Value> {
+    let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+    let agents = &state.config.agents;
+    let copilot_home = std::env::var_os("COPILOT_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".copilot")));
+
+    Ok(Json(json!({
+        "claude_code": agent_entry(agents.claude_code, home.as_ref().map(|h| h.join(".claude"))),
+        "cursor": agent_entry(agents.cursor, home.as_ref().map(|h| h.join(".cursor"))),
+        "gemini_cli": agent_entry(agents.gemini_cli, home.as_ref().map(|h| h.join(".gemini"))),
+        "opencode": agent_entry(agents.opencode, home.as_ref().map(|h| h.join(".config/opencode"))),
+        "codex": agent_entry(agents.codex, home.as_ref().map(|h| h.join(".codex"))),
+        "copilot_cli": agent_entry(agents.copilot_cli, copilot_home),
+    })))
 }
 
 // ---------------------------------------------------------------------------
