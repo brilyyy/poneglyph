@@ -31,8 +31,7 @@ pub struct BuildReport {
 /// changed since the last build.
 pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) -> Result<BuildReport> {
     let exclude = build_exclude_matcher(&config.exclude_patterns);
-    let mut candidates = Vec::new();
-    walk_dir(root, root, &exclude, &mut candidates)?;
+    let candidates = collect_candidates(root, &exclude);
 
     let mut current_paths = std::collections::HashSet::new();
     let mut report = BuildReport::default();
@@ -127,26 +126,38 @@ fn relative_slash_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
-fn walk_dir(root: &Path, dir: &Path, exclude: &globset::GlobSet, out: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()), // permission-denied subdirs etc. — skip rather than abort the whole build
-    };
-    for entry in entries {
-        let entry = entry?;
+/// Walks `root` honoring a project-local `.poneglyphignore` (gitignore
+/// syntax — negation, directory anchoring, etc. via the `ignore` crate)
+/// merged with `config.exclude_patterns` (globset, checked separately):
+/// either source can exclude a path, neither overrides the other into
+/// inclusion. Deliberately does not honor `.gitignore`/`.git/info/exclude`/
+/// the user's global gitignore — this is `.poneglyphignore`-only so existing
+/// configs don't change behavior just because a repo has a `.gitignore`.
+/// Permission-denied subdirs etc. are skipped rather than aborting the build.
+fn collect_candidates(root: &Path, exclude: &globset::GlobSet) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .parents(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .add_custom_ignore_filename(".poneglyphignore")
+        .build();
+
+    for entry in walker {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
         let path = entry.path();
-        let rel = relative_slash_path(root, &path);
+        let rel = relative_slash_path(root, path);
         if exclude.is_match(&rel) {
             continue;
         }
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            walk_dir(root, &path, exclude, out)?;
-        } else if file_type.is_file() {
-            out.push(path);
-        }
+        out.push(path.to_path_buf());
     }
-    Ok(())
+    out
 }
 
 #[cfg(test)]
@@ -231,6 +242,55 @@ mod tests {
         let report = build(&store, dir.path(), &cfg(), true).unwrap();
         // 1 call edge (test_add -> add) + 1 test edge (test_add -> add)
         assert_eq!(report.edges, 2);
+    }
+
+    #[test]
+    fn build_respects_poneglyphignore_file() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("kept.rs"), "fn kept() {}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("ignored_dir")).unwrap();
+        std::fs::write(dir.path().join("ignored_dir/skip.rs"), "fn skip() {}\n").unwrap();
+        std::fs::write(dir.path().join(".poneglyphignore"), "ignored_dir/\n").unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let report = build(&store, dir.path(), &cfg(), true).unwrap();
+
+        assert_eq!(report.files_parsed, 1);
+        assert_eq!(store.cg_nodes_in_file("kept.rs").unwrap().len(), 1);
+        assert!(store.cg_nodes_in_file("ignored_dir/skip.rs").unwrap().is_empty());
+    }
+
+    #[test]
+    fn build_poneglyphignore_negation_pattern() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        // a.rs would normally be excluded by "*.rs", but "!a.rs" un-excludes it —
+        // the concrete payoff of gitignore-correct negation handling.
+        std::fs::write(dir.path().join(".poneglyphignore"), "*.rs\n!a.rs\n").unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let report = build(&store, dir.path(), &cfg(), true).unwrap();
+        assert_eq!(report.files_parsed, 1);
+        assert_eq!(store.cg_nodes_in_file("a.rs").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn build_merges_poneglyphignore_with_config_exclude_patterns() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        std::fs::write(dir.path().join(".poneglyphignore"), "a.rs\n").unwrap();
+
+        let mut config = cfg();
+        config.exclude_patterns = vec!["b.rs".to_string()];
+
+        let store = Store::open_in_memory().unwrap();
+        let report = build(&store, dir.path(), &config, true).unwrap();
+
+        // Both excluded — neither source overrides the other into inclusion.
+        assert_eq!(report.files_parsed, 0);
+        assert!(store.cg_nodes_in_file("a.rs").unwrap().is_empty());
+        assert!(store.cg_nodes_in_file("b.rs").unwrap().is_empty());
     }
 
     #[test]

@@ -98,6 +98,7 @@ tree-sitter-javascript = { version = "0.23" }
 tree-sitter-python     = { version = "0.23" }
 tree-sitter-go         = { version = "0.23" }
 notify                 = { version = "6" }
+ignore                 = { version = "0.4" }
 
 # Internal crates
 poneglyph-core = { path = "crates/poneglyph-core" }
