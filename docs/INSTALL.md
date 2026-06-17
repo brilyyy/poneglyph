@@ -5,10 +5,27 @@
 - **Rust 1.75+** (edition 2024) — install via [rustup](https://rustup.rs)
 - **jq** and **curl** — required for Claude Code hooks (macOS: `brew install jq`)
 
+## Install via npm
+
+```sh
+npm install -g poneglyph
+```
+
+Downloads a prebuilt binary for your platform (macOS arm64/x86_64, Linux
+x86_64, Windows) from GitHub Releases — no Rust toolchain required. Falls
+back to printing a `cargo install` hint if no prebuilt binary matches your
+platform or the release is missing.
+
+## Install via cargo
+
+```sh
+cargo install poneglyph
+```
+
 ## Build from source
 
 ```sh
-git clone https://github.com/your-org/poneglyph.git
+git clone https://github.com/brilyyy/poneglyph.git
 cd poneglyph
 cargo build --release
 ```
