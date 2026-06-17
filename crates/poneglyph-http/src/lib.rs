@@ -26,18 +26,18 @@ pub use state::AppState;
 /// configured (PRD §12). Call before binding anything.
 pub fn validate_security(config: &Config) -> Result<()> {
     let addr: IpAddr = config
-        .server
-        .bind_addr
+        .dashboard
+        .host
         .parse()
-        .with_context(|| format!("server.bind_addr is not a valid IP address: {}", config.server.bind_addr))?;
+        .with_context(|| format!("dashboard.host is not a valid IP address: {}", config.dashboard.host))?;
     let token_ok = config
-        .server
-        .api_token
+        .dashboard
+        .token
         .as_deref()
         .is_some_and(|t| !t.trim().is_empty());
     if !addr.is_loopback() && !token_ok {
         anyhow::bail!(
-            "refusing to start: server.bind_addr {addr} is non-loopback and server.api_token is unset"
+            "refusing to start: dashboard.host {addr} is non-loopback and dashboard.token is unset"
         );
     }
     Ok(())
@@ -74,7 +74,7 @@ pub fn build_router(state: AppState) -> Router {
 /// Bind the configured address. Split from [`serve_on`] so the caller can
 /// decide what a bind failure means (e.g. degrade to MCP-only on AddrInUse).
 pub async fn bind(config: &Config) -> std::io::Result<tokio::net::TcpListener> {
-    let addr = format!("{}:{}", config.server.bind_addr, config.server.http_port);
+    let addr = format!("{}:{}", config.dashboard.host, config.dashboard.port);
     tokio::net::TcpListener::bind(&addr).await
 }
 

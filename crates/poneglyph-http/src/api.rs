@@ -417,24 +417,24 @@ pub async fn stats(State(state): State<AppState>) -> ApiResult<Value> {
 
 /// Dotted paths writable via PATCH. Secrets are never settable over HTTP.
 const MUTABLE_SETTINGS: &[&str] = &[
-    "graph.similarity_threshold",
-    "graph.temporal_window_secs",
+    "memory.edges.similarity_threshold",
+    "memory.edges.temporal_window_secs",
     "context.max_tokens",
     "enrichment.enabled",
     "llm.enabled",
-    "llm.endpoint",
+    "llm.base_url",
     "llm.model",
-    "server.http_port",
-    "server.bind_addr",
+    "dashboard.port",
+    "dashboard.host",
 ];
 
 fn sanitized_settings(config: &poneglyph_core::config::Config) -> Result<Value, ApiError> {
     let mut v = serde_json::to_value(config).map_err(ApiError::internal)?;
-    let token_set = config.server.api_token.as_deref().is_some_and(|t| !t.trim().is_empty());
+    let token_set = config.dashboard.token.as_deref().is_some_and(|t| !t.trim().is_empty());
     let key_set = config.llm.api_key.as_deref().is_some_and(|k| !k.trim().is_empty());
-    if let Some(server) = v.get_mut("server").and_then(Value::as_object_mut) {
-        server.remove("api_token");
-        server.insert("api_token_set".into(), json!(token_set));
+    if let Some(dashboard) = v.get_mut("dashboard").and_then(Value::as_object_mut) {
+        dashboard.remove("token");
+        dashboard.insert("token_set".into(), json!(token_set));
     }
     if let Some(llm) = v.get_mut("llm").and_then(Value::as_object_mut) {
         llm.remove("api_key");

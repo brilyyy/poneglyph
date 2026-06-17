@@ -161,7 +161,7 @@ async fn cmd_serve(config: &Config) -> Result<()> {
     let (enrich, worker) = poneglyph_core::enrich::spawn_worker(
         config.db_path.clone(),
         poneglyph_core::enrich::WorkerConfig {
-            graph: config.graph.clone(),
+            edges: config.memory.edges.clone(),
             llm: config.llm.clone(),
             enrichment: config.enrichment.clone(),
         },
@@ -172,9 +172,9 @@ async fn cmd_serve(config: &Config) -> Result<()> {
     // HTTP server (same DB) and runs MCP-only here.
     let listener = match poneglyph_http::bind(config).await {
         Ok(l) => Some(l),
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && config.server.mcp => {
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && config.dashboard.mcp => {
             tracing::warn!(
-                port = config.server.http_port,
+                port = config.dashboard.port,
                 "HTTP port busy — another poneglyph instance is serving HTTP; continuing MCP-only"
             );
             None
@@ -196,7 +196,7 @@ async fn cmd_serve(config: &Config) -> Result<()> {
     };
 
     // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
-    let result = if config.server.mcp {
+    let result = if config.dashboard.mcp {
         let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store, embedder, shared_config)
             .with_enrich(enrich);
         tokio::select! {
@@ -251,7 +251,7 @@ async fn cmd_demo(config: &Config, count: usize, db: Option<PathBuf>, force: boo
             }
             None => None,
         };
-        tokio::task::block_in_place(|| demo::seed(&store, count, &config.graph, embed))?
+        tokio::task::block_in_place(|| demo::seed(&store, count, &config.memory.edges, embed))?
     };
 
     println!(
@@ -311,7 +311,7 @@ async fn cmd_remember(
     // One-shot process: enqueue the edge job, then drain inline so edges
     // exist without a running server (no-LLM builders are cheap).
     poneglyph_core::enrich::enqueue_compute_edges(&store, &mem.id)?;
-    poneglyph_core::enrich::process_pending_jobs(&store, &config.graph)?;
+    poneglyph_core::enrich::process_pending_jobs(&store, &config.memory.edges)?;
 
     println!("{}", mem.id);
     Ok(())

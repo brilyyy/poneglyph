@@ -13,7 +13,7 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 pub async fn require_token(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let expected = match state.config.server.api_token.as_deref() {
+    let expected = match state.config.dashboard.token.as_deref() {
         Some(t) if !t.trim().is_empty() => t,
         _ => return next.run(req).await, // no token configured ⇒ open (loopback-only)
     };

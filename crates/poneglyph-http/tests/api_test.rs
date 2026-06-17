@@ -397,7 +397,7 @@ async fn stats_and_projects() {
 #[tokio::test]
 async fn settings_get_hides_secrets() {
     let mut config = Config::default();
-    config.server.api_token = Some("super-secret".into());
+    config.dashboard.token = Some("super-secret".into());
     config.llm.api_key = Some("sk-xyz".into());
     let (state, _) = test_state(config);
     let router = build_router(state);
@@ -409,8 +409,8 @@ async fn settings_get_hides_secrets() {
         .unwrap();
     let (status, body) = send(router, req).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["server"]["api_token_set"], true);
-    assert!(body["server"].get("api_token").is_none());
+    assert_eq!(body["dashboard"]["token_set"], true);
+    assert!(body["dashboard"].get("token").is_none());
     assert_eq!(body["llm"]["api_key_set"], true);
     assert!(body["llm"].get("api_key").is_none());
     // Body must never contain the secret values anywhere.
@@ -425,11 +425,11 @@ async fn settings_patch_rejects_non_whitelisted() {
 
     let (status, body) = send(
         router.clone(),
-        json_req("PATCH", "/api/settings", json!({"server": {"api_token": "evil"}})),
+        json_req("PATCH", "/api/settings", json!({"dashboard": {"token": "evil"}})),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap().contains("server.api_token"));
+    assert!(body["error"].as_str().unwrap().contains("dashboard.token"));
 
     let (status, _) = send(
         router,
@@ -446,7 +446,7 @@ async fn settings_patch_rejects_non_whitelisted() {
 #[tokio::test]
 async fn auth_required_when_token_set() {
     let mut config = Config::default();
-    config.server.api_token = Some("tok".into());
+    config.dashboard.token = Some("tok".into());
     let (state, _) = test_state(config);
     let router = build_router(state);
 
@@ -507,19 +507,19 @@ fn validate_security_rules() {
 
     // Non-loopback without token: refused.
     let mut config = Config::default();
-    config.server.bind_addr = "0.0.0.0".into();
+    config.dashboard.host = "0.0.0.0".into();
     assert!(validate_security(&config).is_err());
 
     // Whitespace-only token doesn't count.
-    config.server.api_token = Some("   ".into());
+    config.dashboard.token = Some("   ".into());
     assert!(validate_security(&config).is_err());
 
     // Non-loopback with real token: fine.
-    config.server.api_token = Some("tok".into());
+    config.dashboard.token = Some("tok".into());
     assert!(validate_security(&config).is_ok());
 
     // Garbage bind addr: refused.
-    config.server.bind_addr = "not-an-ip".into();
+    config.dashboard.host = "not-an-ip".into();
     assert!(validate_security(&config).is_err());
 }
 

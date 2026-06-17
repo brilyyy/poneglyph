@@ -38,7 +38,7 @@ impl LlmClient {
         if !cfg.enabled {
             return None;
         }
-        let endpoint = cfg.endpoint.as_deref()?.trim();
+        let endpoint = cfg.base_url.as_deref()?.trim();
         let model = cfg.model.as_deref()?.trim();
         if endpoint.is_empty() || model.is_empty() {
             return None;
@@ -245,9 +245,9 @@ mod tests {
 
         let cfg = LlmConfig {
             enabled: true,
-            endpoint: Some("http://localhost:11434/v1".into()),
+            base_url: Some("http://localhost:11434/v1".into()),
             model: Some("llama3.2".into()),
-            api_key: None,
+            ..Default::default()
         };
         assert!(LlmClient::from_config(&cfg).is_some());
     }

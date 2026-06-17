@@ -10,7 +10,7 @@ use axum::routing::post;
 use axum::Json;
 use serde_json::{json, Value};
 
-use poneglyph_core::config::{EnrichmentConfig, GraphConfig, LlmConfig};
+use poneglyph_core::config::{EnrichmentConfig, LlmConfig, MemoryEdgesConfig};
 use poneglyph_core::enrich::{self, WorkerConfig};
 use poneglyph_core::llm::LlmClient;
 use poneglyph_core::model::{EdgeType, JobType, MemoryType, Source};
@@ -49,16 +49,16 @@ async fn mock_llm(content: &str) -> (String, tokio::task::JoinHandle<()>) {
 fn client_for(endpoint: &str) -> LlmClient {
     LlmClient::from_config(&LlmConfig {
         enabled: true,
-        endpoint: Some(endpoint.to_string()),
+        base_url: Some(endpoint.to_string()),
         model: Some("mock-model".into()),
-        api_key: None,
+        ..Default::default()
     })
     .expect("client should construct")
 }
 
 fn worker_cfg() -> WorkerConfig {
     WorkerConfig {
-        graph: GraphConfig::default(),
+        edges: MemoryEdgesConfig::default(),
         llm: LlmConfig::default(),
         enrichment: EnrichmentConfig::default(),
     }
@@ -190,9 +190,9 @@ async fn garbage_reply_errors_and_retry_path_marks_failed_at_cap() {
     cfg.enrichment.enabled = true;
     cfg.llm = LlmConfig {
         enabled: true,
-        endpoint: Some(endpoint),
+        base_url: Some(endpoint),
         model: Some("mock-model".into()),
-        api_key: None,
+        ..Default::default()
     };
 
     // Drive three passes, rewinding the backoff timestamp between them.
@@ -263,9 +263,9 @@ async fn corrupt_job_with_missing_memory_fails_gracefully() {
     cfg.enrichment.enabled = true;
     cfg.llm = LlmConfig {
         enabled: true,
-        endpoint: Some(endpoint),
+        base_url: Some(endpoint),
         model: Some("mock-model".into()),
-        api_key: None,
+        ..Default::default()
     };
 
     let result = enrich::process_jobs_async(&mut store, &cfg, Some(&client)).await;

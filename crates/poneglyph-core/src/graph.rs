@@ -8,7 +8,7 @@
 use anyhow::Result;
 use rusqlite::params;
 
-use crate::config::GraphConfig;
+use crate::config::MemoryEdgesConfig;
 use crate::model::EdgeType;
 use crate::store::Store;
 
@@ -255,7 +255,7 @@ pub fn nearest_neighbors(store: &Store, memory_id: &str, k: usize) -> Result<Vec
 }
 
 /// Run every no-LLM builder for one memory. Used by the enrichment worker.
-pub fn build_edges_for_memory(store: &Store, cfg: &GraphConfig, memory_id: &str) -> Result<usize> {
+pub fn build_edges_for_memory(store: &Store, cfg: &MemoryEdgesConfig, memory_id: &str) -> Result<usize> {
     let mut n = 0;
     n += build_similarity_edges(store, memory_id, cfg.similarity_threshold)?;
     n += build_temporal_edges(store, memory_id, cfg.temporal_window_secs)?;
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn build_all_combines_builders() {
         let s = store();
-        let cfg = GraphConfig::default();
+        let cfg = MemoryEdgesConfig::default();
         let p = s.upsert_project("/p", "p", None).unwrap();
 
         let m1 = mem(&s, "alpha", Some(&p.id), &["x"]);

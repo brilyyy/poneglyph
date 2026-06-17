@@ -19,6 +19,7 @@ tracing         = { workspace = true }
 uuid            = { workspace = true }
 chrono          = { workspace = true }
 figment         = { workspace = true }
+toml            = { workspace = true }
 directories     = { workspace = true }
 candle-core     = { workspace = true }
 zstd            = { workspace = true }
