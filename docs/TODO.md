@@ -18,7 +18,7 @@ Legend: `[ ]` pending · `[>]` in progress · `[x]` done
 - [x] Implement core::config
 - [x] Implement core::store + migration runner
 - [x] Implement `poneglyph init` CLI command
-- [ ] Add CI workflow
+- [x] Add CI workflow
 
 ---
 
