@@ -289,6 +289,57 @@ fn install_skill_file(skills_dir: &Path) -> Result<bool> {
     Ok(stale)
 }
 
+// ---------------------------------------------------------------------------
+// Opt-in agent rule injection (`poneglyph init --inject-rules`): write a
+// condensed usage block into project instruction files that already exist.
+// Never creates a file the user doesn't have.
+// ---------------------------------------------------------------------------
+
+const RULES_START: &str = "<!-- poneglyph:start -->";
+const RULES_END: &str = "<!-- poneglyph:end -->";
+const RULES_BODY: &str = "## poneglyph: durable memory + code graph\n\nThis project has poneglyph wired up (MCP server `poneglyph serve`). Prefer\nits tools over re-deriving things or grepping for structural code questions:\n\n- `remember` / `recall` / `get_project_context` — durable cross-session\n  memory. Call `get_project_context` at session start, `recall` before\n  re-researching something, `remember` for durable facts/decisions/preferences.\n- `codegraph_query` (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/\n  `path:<a>..<b>`) and `codegraph_blast_radius` — call/import/test graph.\n  Use instead of grep for \"what calls/imports/breaks if I change X\".\n  Requires `poneglyph graph init` to have been run once.";
+const RULE_FILES: [&str; 3] = ["CLAUDE.md", "AGENTS.md", ".cursorrules"];
+
+/// For each of CLAUDE.md/AGENTS.md/.cursorrules that already exists directly
+/// under `project_dir`, idempotently insert/replace a fenced poneglyph usage
+/// block. Returns `(filename, changed)` for each file found.
+pub fn inject_agent_rules(project_dir: &Path) -> Result<Vec<(String, bool)>> {
+    let mut out = Vec::new();
+    for name in RULE_FILES {
+        let path = project_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let changed = inject_rules_block(&path)?;
+        out.push((name.to_string(), changed));
+    }
+    Ok(out)
+}
+
+/// Replace the block between `RULES_START`/`RULES_END` markers if present,
+/// else append one. Returns whether the file content actually changed.
+fn inject_rules_block(path: &Path) -> Result<bool> {
+    let existing = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let block = format!("{RULES_START}\n{RULES_BODY}\n{RULES_END}");
+
+    let new_content = match (existing.find(RULES_START), existing.find(RULES_END)) {
+        (Some(start), Some(end)) if end > start => {
+            let end = end + RULES_END.len();
+            format!("{}{}{}", &existing[..start], block, &existing[end..])
+        }
+        _ => {
+            let sep = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+            format!("{existing}{sep}\n{block}\n")
+        }
+    };
+
+    if new_content == existing {
+        return Ok(false);
+    }
+    std::fs::write(path, new_content).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
+}
+
 fn read_json_object(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(json!({}));
@@ -605,6 +656,45 @@ mod tests {
         assert!(toml.contains("# enabled = false"));
         assert!(!toml.contains("\nenabled = true"));
         let _: toml::Table = toml.parse().expect("fully-commented template must still be valid TOML");
+    }
+
+    #[test]
+    fn inject_agent_rules_only_touches_existing_files() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "# My project\n\nSome existing notes.\n").unwrap();
+        // AGENTS.md and .cursorrules deliberately absent.
+
+        let results = inject_agent_rules(dir.path()).unwrap();
+        assert_eq!(results, vec![("CLAUDE.md".to_string(), true)]);
+        assert!(!dir.path().join("AGENTS.md").exists(), "must never create files the user doesn't have");
+        assert!(!dir.path().join(".cursorrules").exists());
+
+        let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert!(content.contains("Some existing notes."), "must preserve existing content");
+        assert!(content.contains(RULES_START) && content.contains(RULES_END));
+    }
+
+    #[test]
+    fn inject_rules_block_is_idempotent_and_replaces_in_place() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        std::fs::write(&path, "# Agents\n\nBefore.\n\nAfter.\n").unwrap();
+
+        assert!(inject_rules_block(&path).unwrap(), "first call inserts the block");
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(first.contains("Before.") && first.contains("After."));
+
+        assert!(!inject_rules_block(&path).unwrap(), "second call on unchanged content is a no-op");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+
+        // Editing the block content (e.g. a future SKILL.md change) replaces
+        // in place rather than appending a second block.
+        let edited = first.replace(RULES_START, &format!("{RULES_START}\nstale"));
+        std::fs::write(&path, &edited).unwrap();
+        assert!(inject_rules_block(&path).unwrap());
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after.matches(RULES_START).count(), 1, "must not duplicate the block");
+        assert!(!after.contains("stale"));
     }
 
     #[test]
