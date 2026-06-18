@@ -87,9 +87,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Byte conversion for sqlite-vec — manual impl, no dep needed
 
-# Graph algorithms (viewer only, optional)
-petgraph = { version = "0.6" }
-
 # Code knowledge graph (Tree-sitter)
 tree-sitter            = { version = "0.25" }
 tree-sitter-rust       = { version = "0.24" }
@@ -99,8 +96,21 @@ tree-sitter-python     = { version = "0.23" }
 tree-sitter-go         = { version = "0.23" }
 notify                 = { version = "6" }
 ignore                 = { version = "0.4" }
+rayon                  = { version = "1" }
 
 # Internal crates
 poneglyph-core = { path = "crates/poneglyph-core" }
 poneglyph-mcp  = { path = "crates/poneglyph-mcp" }
 poneglyph-http = { path = "crates/poneglyph-http" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

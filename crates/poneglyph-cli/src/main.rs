@@ -101,7 +101,7 @@ enum GraphCommand {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Structured (callers_of:/callees_of:/imports_of:/tests_for:) or keyword query
+    /// Structured (callers_of:/callees_of:/imports_of:/tests_for:/path:<a>..<b>) or keyword query
     Query {
         q: String,
     },
