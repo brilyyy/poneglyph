@@ -26,6 +26,19 @@ sessions, and answer code-impact questions precisely instead of by grep.
 - Before spending time re-deriving something → `recall` first. It may already
   be stored from a prior session.
 
+## All 8 tools
+
+| Tool | Params | Use when |
+| --- | --- | --- |
+| `remember` | content, memory_type, importance?, project_path?, tags?, llm_assist? | A durable fact/decision/preference worth keeping past this session. |
+| `recall` | query, limit?, memory_type?, project_path?, since? | Before re-deriving something — it may already be stored. |
+| `forget` | id | A memory is no longer true or was a duplicate. |
+| `update_memory` | id, new_content | Correct a stored memory in place instead of duplicating it. |
+| `get_project_context` | project_path, max_tokens? | Session start — load ranked prior memory for this project. |
+| `list_memories` | project_path?, memory_type?, limit?, offset? | Hygiene pass — see what's stored before pruning/correcting. |
+| `codegraph_query` | query (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/`path:<a>..<b>`/keyword) | Trace one relationship or the shortest call/import chain between two symbols. |
+| `codegraph_blast_radius` | target, depth? | "What breaks if I change this?" — full transitive dependents + covering tests in one call. |
+
 ## Steps
 
 1. **Session start**: call `get_project_context(project_path)` to load prior
@@ -39,6 +52,8 @@ sessions, and answer code-impact questions precisely instead of by grep.
    - `callees_of:<name>` — what this calls
    - `imports_of:<name>` — who imports this
    - `tests_for:<name>` — tests that cover this
+   - `path:<from>..<to>` — shortest call/import chain between two symbols
+     (e.g. "how does A reach B?")
    - a bare keyword — substring search over symbol names
 3. **Mid-task, when you land on a durable fact/decision**: call
    `remember(content, memory_type, tags)`. Keep `content` short and factual —

@@ -30,4 +30,29 @@ curl -s -m 2 -o /dev/null -X POST "http://127.0.0.1:${PORT}/ingest" \
   ${PONEGLYPH_TOKEN:+-H "Authorization: Bearer ${PONEGLYPH_TOKEN}"} \
   -d "$PAYLOAD" 2>/dev/null
 
+# Self-heal the code graph after source edits, so codegraph_query/
+# blast_radius stay fresh without a separate `poneglyph graph watch`
+# process. ponytail: debounced via a per-project mtime marker file (skip if
+# triggered <10s ago) rather than a real queue — fine for "mostly fresh",
+# `graph watch` is still the answer for guaranteed freshness.
+case "$TOOL" in
+  Edit|Write|MultiEdit)
+    FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
+    case "$FILE_PATH" in
+      *.rs|*.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs|*.py|*.go)
+        CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+        if [ -n "$CWD" ] && command -v poneglyph >/dev/null 2>&1; then
+          HASH=$(printf '%s' "$CWD" | (md5 -q 2>/dev/null || md5sum 2>/dev/null | cut -d' ' -f1))
+          MARKER="${TMPDIR:-/tmp}/poneglyph-graph-debounce-${HASH}"
+          LAST=$(stat -f %m "$MARKER" 2>/dev/null || stat -c %Y "$MARKER" 2>/dev/null || echo 0)
+          if [ $(($(date +%s) - LAST)) -ge 10 ]; then
+            touch "$MARKER" 2>/dev/null
+            (poneglyph graph update "$CWD" >/dev/null 2>&1 &) 2>/dev/null
+          fi
+        fi
+        ;;
+    esac
+    ;;
+esac
+
 exit 0  # always succeed — never block Claude Code
