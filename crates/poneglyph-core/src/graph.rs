@@ -15,6 +15,12 @@ use crate::store::Store;
 /// How many nearest neighbours to consider for similarity edges.
 const SIMILARITY_CANDIDATES: usize = 20;
 
+/// Tag-overlap edges need either ≥2 shared tags or a high Jaccard ratio —
+/// one shared generic tag (e.g. "architecture") among several otherwise
+/// unrelated tags bridges unrelated projects and is noise, not signal.
+const MIN_SHARED_TAGS: usize = 2;
+const MIN_TAG_JACCARD: f64 = 0.5;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -213,6 +219,9 @@ pub fn build_tag_overlap_edges(store: &Store, memory_id: &str) -> Result<usize> 
             continue;
         }
         let jaccard = shared as f64 / my_tags.union(&other_set).count() as f64;
+        if shared < MIN_SHARED_TAGS && jaccard < MIN_TAG_JACCARD {
+            continue;
+        }
         let (a, b) = canonical(memory_id, &other_id);
         if store
             .create_edge(a, b, EdgeType::TagOverlap, None, jaccard)?
@@ -386,25 +395,43 @@ mod tests {
     fn tag_overlap_edges_with_jaccard_weight() {
         let s = store();
         let m1 = mem(&s, "rust memory engine", None, &["rust", "memory"]);
-        let m2 = mem(&s, "rust cli tooling", None, &["rust", "cli"]);
+        let m2 = mem(&s, "rust cli tooling", None, &["rust", "memory", "cli"]);
         let m3 = mem(&s, "cooking pasta", None, &["food"]);
         let m4 = mem(&s, "untagged", None, &[]);
 
         let created = build_tag_overlap_edges(&s, &m1).unwrap();
-        assert_eq!(created, 1);
+        assert_eq!(created, 1, "2 shared tags clears the noise floor");
 
         let edges = s.get_edges_for_memory(&m1).unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].edge_type, EdgeType::TagOverlap);
-        // {rust} / {rust, memory, cli} = 1/3
-        assert!((edges[0].weight - 1.0 / 3.0).abs() < 1e-9);
+        // {rust, memory} / {rust, memory, cli} = 2/3
+        assert!((edges[0].weight - 2.0 / 3.0).abs() < 1e-9);
 
         assert_eq!(build_tag_overlap_edges(&s, &m3).unwrap(), 0);
         assert_eq!(build_tag_overlap_edges(&s, &m4).unwrap(), 0);
 
         // Recompute from the other side: same canonical row, no duplicate.
         assert_eq!(build_tag_overlap_edges(&s, &m2).unwrap(), 0);
+    }
+
+    #[test]
+    fn tag_overlap_skips_single_generic_tag_noise() {
+        let s = store();
+        // One shared tag ("architecture") buried among unrelated tags should
+        // not bridge two otherwise unrelated memories (low Jaccard, <2 shared).
+        let m1 = mem(&s, "switched to grpc", None, &["grpc", "architecture"]);
+        let m2 = mem(&s, "use app router", None, &["nextjs", "architecture"]);
+        assert_eq!(build_tag_overlap_edges(&s, &m1).unwrap(), 0);
+        assert_eq!(s.get_edges_for_memory(&m1).unwrap().len(), 0);
+
+        // But a single shared tag where it's the *only* tag on both sides
+        // (jaccard 1.0) is a real signal, not noise.
+        let m3 = mem(&s, "first", None, &["onboarding"]);
+        let m4 = mem(&s, "second", None, &["onboarding"]);
+        assert_eq!(build_tag_overlap_edges(&s, &m3).unwrap(), 1);
         let _ = m2;
+        let _ = m4;
     }
 
     #[test]

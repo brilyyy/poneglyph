@@ -200,11 +200,16 @@ pub async fn search(
 // /api/graph
 // ---------------------------------------------------------------------------
 
+/// Edges below this weight (e.g. single-generic-tag overlaps) are noise in
+/// the viewer; drop them by default but let callers opt back in to raw data.
+const DEFAULT_MIN_EDGE_WEIGHT: f64 = 0.4;
+
 #[derive(Deserialize)]
 pub struct GraphQuery {
     pub focus: Option<String>,
     pub depth: Option<u32>,
     pub limit: Option<usize>,
+    pub min_weight: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -219,6 +224,7 @@ pub async fn graph(
 ) -> ApiResult<GraphResponse> {
     let depth = q.depth.unwrap_or(1).clamp(1, 5);
     let limit = q.limit.unwrap_or(500).clamp(1, 2000);
+    let min_weight = q.min_weight.unwrap_or(DEFAULT_MIN_EDGE_WEIGHT).clamp(0.0, 1.0);
 
     let store = state.lock_store()?;
     let (nodes, edges) = match q.focus.as_deref() {
@@ -226,9 +232,9 @@ pub async fn graph(
             if store.get_memory(focus)?.is_none() {
                 return Err(ApiError::not_found(format!("memory not found: {focus}")));
             }
-            store.graph_neighborhood(focus, depth, limit)?
+            store.graph_neighborhood(focus, depth, limit, min_weight)?
         }
-        None => store.graph_sample(limit)?,
+        None => store.graph_sample(limit, min_weight)?,
     };
     Ok(Json(GraphResponse { nodes, edges }))
 }

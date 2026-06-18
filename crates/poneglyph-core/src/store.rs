@@ -1033,6 +1033,7 @@ impl Store {
         focus: &str,
         depth: u32,
         max_nodes: usize,
+        min_weight: f64,
     ) -> Result<(Vec<Memory>, Vec<Edge>)> {
         use std::collections::HashSet;
 
@@ -1048,13 +1049,15 @@ impl Store {
             for chunk in frontier.chunks(SQL_IN_CHUNK) {
                 let ph: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
                 let ph = ph.join(", ");
+                let weight_ph = chunk.len() + 1;
                 let sql = format!(
                     "SELECT id, src_id, dst_id, edge_type, label, weight, created_at
-                     FROM edges WHERE src_id IN ({ph}) OR dst_id IN ({ph})"
+                     FROM edges WHERE (src_id IN ({ph}) OR dst_id IN ({ph})) AND weight >= ?{weight_ph}"
                 );
                 let mut stmt = self.conn.prepare(&sql)?;
-                let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                let mut params_refs: Vec<&dyn rusqlite::types::ToSql> =
                     chunk.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+                params_refs.push(&min_weight);
                 let found: Vec<Edge> = stmt
                     .query_map(params_refs.as_slice(), |row| row_to_edge(row))?
                     .collect::<rusqlite::Result<_>>()?;
@@ -1086,7 +1089,7 @@ impl Store {
 
     /// Global graph sample for the initial explorer load: the `max_nodes`
     /// most recent memories plus all edges with both endpoints in the sample.
-    pub fn graph_sample(&self, max_nodes: usize) -> Result<(Vec<Memory>, Vec<Edge>)> {
+    pub fn graph_sample(&self, max_nodes: usize, min_weight: f64) -> Result<(Vec<Memory>, Vec<Edge>)> {
         use std::collections::HashSet;
 
         let mut stmt = self.conn.prepare(
@@ -1105,14 +1108,16 @@ impl Store {
         let mut edges: Vec<Edge> = Vec::new();
         for chunk in id_vec.chunks(SQL_IN_CHUNK) {
             let ph: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+            let weight_ph = chunk.len() + 1;
             let sql = format!(
                 "SELECT id, src_id, dst_id, edge_type, label, weight, created_at
-                 FROM edges WHERE src_id IN ({})",
+                 FROM edges WHERE src_id IN ({}) AND weight >= ?{weight_ph}",
                 ph.join(", ")
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            let mut params_refs: Vec<&dyn rusqlite::types::ToSql> =
                 chunk.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            params_refs.push(&min_weight);
             let found = stmt
                 .query_map(params_refs.as_slice(), |row| row_to_edge(row))?
                 .collect::<rusqlite::Result<Vec<Edge>>>()?;
@@ -1664,19 +1669,19 @@ mod tests {
         store.create_edge(&c.id, &d.id, EdgeType::Similarity, None, 0.9).unwrap();
 
         // depth=1 from b: {a, b, c}, 2 edges
-        let (nodes, edges) = store.graph_neighborhood(&b.id, 1, 500).unwrap();
+        let (nodes, edges) = store.graph_neighborhood(&b.id, 1, 500, 0.0).unwrap();
         let ids: Vec<&str> = nodes.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(nodes.len(), 3);
         assert!(ids.contains(&a.id.as_str()) && ids.contains(&b.id.as_str()) && ids.contains(&c.id.as_str()));
         assert_eq!(edges.len(), 2);
 
         // depth=2 from b: all 4 nodes, 3 edges
-        let (nodes, edges) = store.graph_neighborhood(&b.id, 2, 500).unwrap();
+        let (nodes, edges) = store.graph_neighborhood(&b.id, 2, 500, 0.0).unwrap();
         assert_eq!(nodes.len(), 4);
         assert_eq!(edges.len(), 3);
 
         // max_nodes cap
-        let (nodes, edges) = store.graph_neighborhood(&b.id, 2, 2).unwrap();
+        let (nodes, edges) = store.graph_neighborhood(&b.id, 2, 2, 0.0).unwrap();
         assert_eq!(nodes.len(), 2);
         // Only edges with both endpoints inside the cap survive.
         for e in &edges {
@@ -1694,12 +1699,12 @@ mod tests {
         store.create_edge(&a.id, &b.id, EdgeType::Similarity, None, 0.9).unwrap();
         store.create_edge(&b.id, &c.id, EdgeType::Temporal, None, 1.0).unwrap();
 
-        let (nodes, edges) = store.graph_sample(500).unwrap();
+        let (nodes, edges) = store.graph_sample(500, 0.0).unwrap();
         assert_eq!(nodes.len(), 3);
         assert_eq!(edges.len(), 2);
 
         // Sample of 2 most-recent (b, c): only the b—c edge has both endpoints.
-        let (nodes, edges) = store.graph_sample(2).unwrap();
+        let (nodes, edges) = store.graph_sample(2, 0.0).unwrap();
         assert_eq!(nodes.len(), 2);
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].src_id, b.id);
@@ -1961,7 +1966,7 @@ mod tests {
     #[test]
     fn graph_sample_empty_db() {
         let store = test_store();
-        let (nodes, edges) = store.graph_sample(100).unwrap();
+        let (nodes, edges) = store.graph_sample(100, 0.0).unwrap();
         assert!(nodes.is_empty());
         assert!(edges.is_empty());
     }
@@ -1969,7 +1974,7 @@ mod tests {
     #[test]
     fn graph_neighborhood_unknown_focus() {
         let store = test_store();
-        let result = store.graph_neighborhood("no-such-id", 1, 100);
+        let result = store.graph_neighborhood("no-such-id", 1, 100, 0.0);
         // Should return empty, not error.
         let (nodes, edges) = result.unwrap();
         assert!(nodes.is_empty());
