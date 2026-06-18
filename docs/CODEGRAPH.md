@@ -19,6 +19,8 @@ poneglyph graph watch [path]
 ```
 
 Languages auto-detected by extension: rust, typescript, javascript, python, go.
+Per-file parsing runs in parallel (rayon); DB writes stay serial since the
+build shares one connection.
 
 ## Query the graph
 
@@ -28,6 +30,9 @@ poneglyph graph query "callers_of:build_exclude_matcher"
 poneglyph graph query "callees_of:build_exclude_matcher"
 poneglyph graph query "imports_of:build_exclude_matcher"
 poneglyph graph query "tests_for:build_exclude_matcher"
+
+# Shortest call/import chain between two symbols
+poneglyph graph query "path:cmd_init..install_skill_file"
 
 # Bare keyword falls back to name search
 poneglyph graph query "exclude_matcher"
@@ -59,13 +64,14 @@ enabled = true
 exclude_patterns = ["**/target/**", "**/node_modules/**", "**/.git/**", "**/*.test.ts", "**/*_test.rs"]
 watch_delay_ms = 2000
 blast_radius_depth = 5
+max_render_nodes = 50000
 ```
 
 ## MCP tools
 
 | Tool | Params | Description |
 |---|---|---|
-| `codegraph_query` | `query: String` | `callers_of:<name>`, `callees_of:<name>`, `imports_of:<name>`, `tests_for:<name>`, or a bare keyword search. Requires `poneglyph graph init` to have been run. |
+| `codegraph_query` | `query: String` | `callers_of:<name>`, `callees_of:<name>`, `imports_of:<name>`, `tests_for:<name>`, `path:<a>..<b>` (shortest call/import chain between two symbols), or a bare keyword search. Requires `poneglyph graph init` to have been run. |
 | `codegraph_blast_radius` | `target: String`, `depth?: usize` | Recursive caller/importer/test trace from a file or symbol — what breaks if this changes. `depth` defaults to `[graph].blast_radius_depth`. |
 
 Response shapes:
@@ -81,7 +87,7 @@ struct CodegraphBlastRadiusResponse { root: Vec<CodegraphNodeView>, dependents: 
 
 | Route | Backing API | Purpose |
 |---|---|---|
-| `/codegraph` | `GET /api/codegraph?focus=&depth=&limit=` | Interactive graph viewer. With `focus`, centers on a blast-radius trace; without it, samples up to `limit` nodes (default 500). Returns `{ nodes, edges }`. |
+| `/codegraph` | `GET /api/codegraph?focus=&depth=&limit=` | GPU-rendered (cosmos.gl/WebGL) graph viewer, with a render-limit slider. With `focus`, centers on a blast-radius trace; without it, samples up to `limit` nodes (default 500, capped by `[graph].max_render_nodes`, default 50000). Returns `{ nodes, edges, total_nodes, total_edges }` — the totals are exact regardless of `limit`, so the UI can show "showing X of Y (sampled)". |
 | — | `GET /api/codegraph/stats` | `{ files, nodes, edges }` counts. |
 | `/token-savings` | `GET /api/token-savings` | Samples up to 200 memories and estimates caveman-compression savings: `{ sampled_memories, original_bytes, compressed_bytes, savings_pct, compression_enabled }`. |
 | `/status` | `GET /api/agents-status` | Per-agent wiring status (config flag + detected install dir) for `claude_code`, `cursor`, `gemini_cli`, `opencode`, `codex`, `copilot_cli`. |

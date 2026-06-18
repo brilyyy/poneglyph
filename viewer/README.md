@@ -1,5 +1,15 @@
 Welcome to your new TanStack Start app! 
 
+## Graph rendering
+
+`/graph` and `/codegraph` render via [`@cosmos.gl/graph`](https://github.com/cosmosgl/graph)
+(WebGL, GPU force simulation) through the shared `CosmosGraph` component in
+`src/components/cosmos-graph.tsx` — chosen over a DOM/SVG renderer (the
+previous React Flow + d3-force setup) so the graph views scale well past a
+few thousand nodes. Both views show a "showing X of Y (sampled)" banner plus
+a render-limit slider, backed by `total_nodes`/`total_edges` in the
+`/api/graph` and `/api/codegraph` responses.
+
 # Getting Started
 
 To run this application:

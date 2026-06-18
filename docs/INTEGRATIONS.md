@@ -28,6 +28,20 @@ cp hooks/poneglyph/SKILL.md ~/.claude/skills/poneglyph/SKILL.md
 
 (Or project-scoped: `.claude/skills/poneglyph/SKILL.md`.)
 
+### Inject usage rules into CLAUDE.md / AGENTS.md / .cursorrules
+
+Opt-in — `poneglyph init` never touches these files unless asked:
+
+```sh
+poneglyph init --inject-rules
+```
+
+For each of `CLAUDE.md`, `AGENTS.md`, `.cursorrules` that already exists in
+the current directory, idempotently inserts/replaces a fenced
+`<!-- poneglyph:start --> ... <!-- poneglyph:end -->` block with a condensed
+usage summary. Never creates a file that doesn't already exist; re-running
+replaces the block in place instead of duplicating it.
+
 ### Configure Claude Code
 
 Merge into `~/.claude/settings.json` (or a project's `.claude/settings.json`):
@@ -64,7 +78,7 @@ Merge into `~/.claude/settings.json` (or a project's `.claude/settings.json`):
 
 | Hook | Event | Memory type | Content |
 |---|---|---|---|
-| `posttooluse.sh` | PostToolUse | `code_context` | Tool name + input + output |
+| `posttooluse.sh` | PostToolUse | `code_context` | Tool name + input + output. Also debounce-triggers `poneglyph graph update` (skip if triggered <10s ago) after `Edit`/`Write`/`MultiEdit` on a recognized source extension, so the code graph self-heals without a separate `graph watch` process. |
 | `userpromptsubmit.sh` | UserPromptSubmit | `episodic` | User prompt text |
 | `stop.sh` | Stop | `episodic` | Last assistant message |
 | `sessionstart.sh` | SessionStart | *(read-only)* | Injects project context |
@@ -119,7 +133,7 @@ macOS):
 | `update_memory` | Edit content, importance, or metadata |
 | `get_project_context` | Get ranked context string for a project |
 | `list_memories` | List memories with filters |
-| `codegraph_query` | Query the code knowledge graph (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/keyword) |
+| `codegraph_query` | Query the code knowledge graph (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/`path:<a>..<b>`/keyword) |
 | `codegraph_blast_radius` | Recursive caller/importer/test trace — what breaks if this changes |
 
 Both codegraph tools require `poneglyph graph init` to have been run first

@@ -7,11 +7,12 @@ agent has project context across sessions.
 
 - **Hybrid retrieval** — dense embeddings (384d) + FTS5 + 1-hop graph expansion with RRF fusion
 - **Knowledge graph** — explicit, similarity, temporal, tag-overlap, and optional LLM relation edges
-- **Code knowledge graph** — Tree-sitter parsed callers/callees/imports/tests across rust/ts/js/python/go, with `.poneglyphignore` support
+- **Code knowledge graph** — Tree-sitter parsed callers/callees/imports/tests across rust/ts/js/python/go, with `.poneglyphignore` support, parallel (rayon) parsing, and a `path:<a>..<b>` shortest-chain query
 - **MCP server** — 6 memory tools (remember, recall, forget, update, context, list) + 2 codegraph tools (`codegraph_query`, `codegraph_blast_radius`)
-- **Claude Code skill + OpenCode plugin** — teaches agents when to use memory/codegraph tools instead of ad-hoc grepping
+- **Claude Code skill + OpenCode plugin** — teaches agents when to use memory/codegraph tools instead of ad-hoc grepping; `poneglyph init --inject-rules` can also inject a condensed usage block into an existing `CLAUDE.md`/`AGENTS.md`/`.cursorrules`
+- **Self-healing code graph** — the PostToolUse hook debounce-triggers `graph update` after source edits, so `codegraph_query`/`codegraph_blast_radius` stay fresh without a separate watch process
 - **Passive capture** — Claude Code hooks + OpenCode plugin auto-capture tool executions, prompts, and assistant messages
-- **Web viewer** — dashboard, memories list/detail, search, graph explorer, timeline, codegraph, token-savings, agent status, settings
+- **Web viewer** — dashboard, memories list/detail, search, timeline, token-savings, agent status, settings, and a GPU-rendered (WebGL) graph explorer + codegraph view that scales well past what a DOM-based renderer can handle, with a "showing X of Y" sampling indicator and render-limit slider
 - **Zero-token context injection** — session context from your project's memories, no LLM calls
 - **Optional LLM enrichment** — summarize, extract entities/relations, score importance, semantic compression (off by default)
 - **Fully offline** — after first-run model download, everything runs locally
@@ -69,7 +70,7 @@ poneglyph-cli       ── clap binary (init, serve, remember, recall, demo, ...
 poneglyph-http      ── axum server (/ingest, /api/*, embedded viewer)
 poneglyph-mcp       ── rmcp stdio server (8 tools: memory + codegraph)
 poneglyph-core      ── store, embed, retrieve, graph, codegraph, compress, enrich, llm, config
-viewer/             ── TanStack Router + React + React Flow SPA
+viewer/             ── TanStack Router + React SPA; graph views render via cosmos.gl (WebGL)
 hooks/claude-code/  ── bash hooks (posttooluse, userpromptsubmit, stop, sessionstart)
 hooks/opencode/     ── TypeScript plugin
 hooks/poneglyph/    ── Claude Code skill (SKILL.md)
