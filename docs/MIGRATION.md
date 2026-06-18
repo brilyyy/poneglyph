@@ -1,5 +1,36 @@
 # Migration Guide
 
+Schema version is tracked in `schema_meta.schema_version` and checked on
+every `Store::open` — migrations run automatically and in order, no manual
+step beyond starting `poneglyph` (`init`/`serve`/any CLI command). Each
+step below is additive; no destructive changes have been made to any
+existing column or table.
+
+## v3 → v4 — compression cache
+
+Added (`crates/poneglyph-core/src/store.rs:163-166`):
+
+```sql
+ALTER TABLE memories ADD COLUMN compressed_content TEXT;
+ALTER TABLE memories ADD COLUMN compression_mode    TEXT;
+```
+
+`compressed_content` is a cache for context injection only —
+recall/FTS/vector search never read it, and `content` itself is never
+overwritten. See [COMPRESSION.md](COMPRESSION.md).
+
+## v2 → v3 — code knowledge graph
+
+Added `cg_files`, `cg_nodes`, `cg_edges` tables (Tree-sitter code graph;
+distinct from the memory-linkage `edges` table from v1). See
+[CODEGRAPH.md](CODEGRAPH.md).
+
+## v1 → v2 — schema decoys
+
+Added `memories.is_decoy` / `tier` / `strength` / `cold_path` columns and
+the `decoy_children` table, supporting `poneglyph consolidate` /
+`poneglyph decay`.
+
 ## v0 → v1 (Genesis)
 
 **v1 is the first release.** There is no v0 schema to migrate from — all prior development used schema version 1, which is the DDL shipped in `poneglyph-core/src/store.rs`.

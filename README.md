@@ -7,11 +7,13 @@ agent has project context across sessions.
 
 - **Hybrid retrieval** — dense embeddings (384d) + FTS5 + 1-hop graph expansion with RRF fusion
 - **Knowledge graph** — explicit, similarity, temporal, tag-overlap, and optional LLM relation edges
-- **MCP server** — 6 tools for Claude Code / Claude Desktop (remember, recall, forget, update, context, list)
+- **Code knowledge graph** — Tree-sitter parsed callers/callees/imports/tests across rust/ts/js/python/go, with `.poneglyphignore` support
+- **MCP server** — 6 memory tools (remember, recall, forget, update, context, list) + 2 codegraph tools (`codegraph_query`, `codegraph_blast_radius`)
+- **Claude Code skill + OpenCode plugin** — teaches agents when to use memory/codegraph tools instead of ad-hoc grepping
 - **Passive capture** — Claude Code hooks + OpenCode plugin auto-capture tool executions, prompts, and assistant messages
-- **Web viewer** — dashboard, memories list/detail, search, graph explorer, timeline, settings
+- **Web viewer** — dashboard, memories list/detail, search, graph explorer, timeline, codegraph, token-savings, agent status, settings
 - **Zero-token context injection** — session context from your project's memories, no LLM calls
-- **Optional LLM enrichment** — summarize, extract entities/relations, score importance (off by default)
+- **Optional LLM enrichment** — summarize, extract entities/relations, score importance, semantic compression (off by default)
 - **Fully offline** — after first-run model download, everything runs locally
 
 ## Quick start
@@ -43,7 +45,10 @@ open http://127.0.0.1:3742
 
 - [INSTALL.md](docs/INSTALL.md) — build from source, configuration, first run
 - [INTEGRATIONS.md](docs/INTEGRATIONS.md) — Claude Code, Claude Desktop, OpenCode setup
+- [CODEGRAPH.md](docs/CODEGRAPH.md) — code knowledge graph CLI, `.poneglyphignore`, MCP tools, dashboard
+- [COMPRESSION.md](docs/COMPRESSION.md) — semantic compression pipeline
 - [MIGRATION.md](docs/MIGRATION.md) — schema migration guide
+- [CHANGELOG.md](CHANGELOG.md) — notable changes by phase
 - [PRD](docs/poneglyph_PRD.md) — full product requirements document
 
 ## Architecture
@@ -51,11 +56,12 @@ open http://127.0.0.1:3742
 ```
 poneglyph-cli       ── clap binary (init, serve, remember, recall, demo, ...)
 poneglyph-http      ── axum server (/ingest, /api/*, embedded viewer)
-poneglyph-mcp       ── rmcp stdio server (6 tools)
-poneglyph-core      ── store, embed, retrieve, graph, enrich, llm, config
+poneglyph-mcp       ── rmcp stdio server (8 tools: memory + codegraph)
+poneglyph-core      ── store, embed, retrieve, graph, codegraph, compress, enrich, llm, config
 viewer/             ── TanStack Router + React + React Flow SPA
 hooks/claude-code/  ── bash hooks (posttooluse, userpromptsubmit, stop, sessionstart)
 hooks/opencode/     ── TypeScript plugin
+hooks/poneglyph/    ── Claude Code skill (SKILL.md)
 ```
 
 ## Configuration

@@ -16,6 +16,18 @@ cp hooks/claude-code/*.sh ~/.config/poneglyph/hooks/
 chmod +x ~/.config/poneglyph/hooks/*.sh
 ```
 
+### Install the skill
+
+Teaches Claude Code when to reach for `remember`/`recall`/`get_project_context`
+and `codegraph_query`/`codegraph_blast_radius` instead of ad-hoc grepping:
+
+```sh
+mkdir -p ~/.claude/skills/poneglyph
+cp hooks/poneglyph/SKILL.md ~/.claude/skills/poneglyph/SKILL.md
+```
+
+(Or project-scoped: `.claude/skills/poneglyph/SKILL.md`.)
+
 ### Configure Claude Code
 
 Merge into `~/.claude/settings.json` (or a project's `.claude/settings.json`):
@@ -107,6 +119,11 @@ macOS):
 | `update_memory` | Edit content, importance, or metadata |
 | `get_project_context` | Get ranked context string for a project |
 | `list_memories` | List memories with filters |
+| `codegraph_query` | Query the code knowledge graph (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/keyword) |
+| `codegraph_blast_radius` | Recursive caller/importer/test trace — what breaks if this changes |
+
+Both codegraph tools require `poneglyph graph init` to have been run first
+— see [CODEGRAPH.md](CODEGRAPH.md).
 
 ## OpenCode (plugin)
 
