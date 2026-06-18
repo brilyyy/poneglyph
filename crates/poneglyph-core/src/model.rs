@@ -198,21 +198,16 @@ impl std::str::FromStr for JobStatus {
 // ---------------------------------------------------------------------------
 
 /// Storage tier — determines where content lives.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
     /// Full content in DB, searchable via dense + FTS.
+    #[default]
     Hot,
     /// Full content in DB, accessed occasionally.
     Warm,
     /// Content compressed to .zst file, lazy-loaded on demand.
     Cold,
-}
-
-impl Default for Tier {
-    fn default() -> Self {
-        Self::Hot
-    }
 }
 
 impl std::fmt::Display for Tier {

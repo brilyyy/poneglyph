@@ -68,6 +68,8 @@ export interface SearchHit extends Memory {
 export interface GraphResponse {
   nodes: Memory[]
   edges: Edge[]
+  total_nodes: number
+  total_edges: number
 }
 
 export interface ListResponse {
@@ -147,6 +149,13 @@ export interface CgEdge {
 export interface CodegraphResponse {
   nodes: CgNode[]
   edges: CgEdge[]
+  total_nodes: number
+  total_edges: number
+}
+
+export interface ProjectContext {
+  context: string
+  memory_count: number
 }
 
 export interface CodegraphStats {

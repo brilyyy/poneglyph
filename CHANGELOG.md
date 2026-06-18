@@ -2,6 +2,31 @@
 
 Notable changes on `refactor/unified-v2`. Earlier history: `git log`.
 
+## Phase E — GPU graph viewer, parallel codegraph build, self-healing hooks
+
+- Cargo: `[profile.dev]`/`[profile.release]` (lto, codegen-units, opt-level).
+- `codegraph::build` parses files in parallel via rayon (DB writes stay serial).
+- New `path:<a>..<b>` codegraph query — shortest call/import chain between
+  two symbols (CLI, MCP `codegraph_query`).
+- `/api/graph` and `/api/codegraph` now return exact `total_nodes`/
+  `total_edges` alongside the sampled arrays; the render cap is configurable
+  via `[graph].max_render_nodes` (default 50000, was a hardcoded 2000).
+- Viewer: `/graph` and `/codegraph` swapped from React Flow (DOM/SVG) +
+  main-thread d3-force to `@cosmos.gl/graph` (WebGL, GPU simulation) —
+  scales well past what the old stack could render. Both views show a
+  "showing X of Y (sampled)" banner and a render-limit slider; node
+  size/opacity now encode importance/tier/connection-count, fields that
+  previously had no visual representation. Status page gained a "Graph
+  coverage" card and a `/api/context` preview panel.
+- `posttooluse.sh` debounce-triggers `poneglyph graph update` after source
+  edits (skip if triggered <10s ago), so the code graph self-heals without a
+  separate `graph watch` process; `sessionstart.sh` nudges toward
+  `graph init` when the graph is empty.
+- `poneglyph init --inject-rules` (opt-in): idempotently injects a condensed
+  usage block into `CLAUDE.md`/`AGENTS.md`/`.cursorrules`, for any that
+  already exist. Never creates new files.
+- `SKILL.md` expanded with the `path:` syntax and a full 8-tool reference.
+
 ## Phase D — Semantic compression pipeline (`65699a1`)
 
 Schema v4: `memories.compressed_content` / `memories.compression_mode`.

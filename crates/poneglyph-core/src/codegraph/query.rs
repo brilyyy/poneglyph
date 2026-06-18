@@ -2,6 +2,8 @@
 //! imports_of / tests_for (all "who depends on this", i.e. reverse edges,
 //! except callees_of which is inherently forward) plus a keyword fallback.
 
+use std::collections::{HashMap, VecDeque};
+
 use anyhow::Result;
 
 use crate::model::{CgEdgeKind, CgNode, CgNodeKind};
@@ -14,12 +16,14 @@ pub enum GraphQuery {
     CalleesOf(String),
     ImportsOf(String),
     TestsFor(String),
+    /// `path:<from>..<to>` — shortest call/import chain between two symbols.
+    Path(String, String),
     Keyword(String),
 }
 
 /// Parses `callers_of:<name>`, `callees_of:<name>`, `imports_of:<name>`,
-/// `tests_for:<name>`; anything else (including a bare name) is a keyword
-/// search.
+/// `tests_for:<name>`, `path:<from>..<to>`; anything else (including a bare
+/// name) is a keyword search.
 pub fn parse_query(input: &str) -> GraphQuery {
     let trimmed = input.trim();
     for (prefix, ctor) in [
@@ -30,6 +34,11 @@ pub fn parse_query(input: &str) -> GraphQuery {
     ] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             return ctor(rest.trim().to_string());
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("path:") {
+        if let Some((from, to)) = rest.split_once("..") {
+            return GraphQuery::Path(from.trim().to_string(), to.trim().to_string());
         }
     }
     GraphQuery::Keyword(trimmed.to_string())
@@ -69,8 +78,60 @@ pub fn run(store: &Store, query: &GraphQuery) -> Result<Vec<CgNode>> {
             let Some(target) = first_match_by_name(store, name)? else { return Ok(Vec::new()) };
             store.cg_edges_into(&target.id, CgEdgeKind::Tests)
         }
+        GraphQuery::Path(from, to) => shortest_path(store, from, to),
         GraphQuery::Keyword(kw) => store.cg_search_by_name(kw, 50),
     }
+}
+
+/// BFS over forward Calls+Imports edges — shortest hop count, not weighted.
+/// Returns the node chain from `from` to `to` inclusive, or empty if either
+/// symbol is unknown or no path exists within the graph.
+fn shortest_path(store: &Store, from: &str, to: &str) -> Result<Vec<CgNode>> {
+    let Some(start) = first_match_by_name(store, from)? else { return Ok(Vec::new()) };
+    let Some(end) = first_match_by_name(store, to)? else { return Ok(Vec::new()) };
+    if start.id == end.id {
+        return Ok(vec![start]);
+    }
+
+    let mut parent: HashMap<String, String> = HashMap::new();
+    let mut visited: HashMap<String, CgNode> = HashMap::new();
+    let mut queue = VecDeque::new();
+    visited.insert(start.id.clone(), start.clone());
+    queue.push_back(start.id.clone());
+
+    while let Some(current_id) = queue.pop_front() {
+        let mut neighbors = store.cg_edges_out_of(&current_id, CgEdgeKind::Calls)?;
+        neighbors.extend(store.cg_edges_out_of(&current_id, CgEdgeKind::Imports)?);
+
+        for next in neighbors {
+            if visited.contains_key(&next.id) {
+                continue;
+            }
+            parent.insert(next.id.clone(), current_id.clone());
+            if next.id == end.id {
+                return Ok(reconstruct_path(&parent, &visited, &start, &next));
+            }
+            visited.insert(next.id.clone(), next.clone());
+            queue.push_back(next.id);
+        }
+    }
+
+    Ok(Vec::new())
+}
+
+fn reconstruct_path(parent: &HashMap<String, String>, visited: &HashMap<String, CgNode>, start: &CgNode, end: &CgNode) -> Vec<CgNode> {
+    let mut chain = vec![end.clone()];
+    let mut current = end.id.clone();
+    while let Some(prev_id) = parent.get(&current) {
+        if *prev_id == start.id {
+            chain.push(start.clone());
+            break;
+        }
+        chain.push(visited[prev_id].clone());
+        current = prev_id.clone();
+    }
+    chain.reverse();
+    chain
 }
 
 #[cfg(test)]
@@ -95,7 +156,27 @@ mod tests {
         assert_eq!(parse_query("callees_of:foo"), GraphQuery::CalleesOf("foo".into()));
         assert_eq!(parse_query("imports_of:foo"), GraphQuery::ImportsOf("foo".into()));
         assert_eq!(parse_query("tests_for:foo"), GraphQuery::TestsFor("foo".into()));
+        assert_eq!(parse_query("path:foo..bar"), GraphQuery::Path("foo".into(), "bar".into()));
         assert_eq!(parse_query("foo"), GraphQuery::Keyword("foo".into()));
+    }
+
+    #[test]
+    fn path_finds_shortest_call_chain() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("chain.py"), "def a():\n    b()\n\ndef b():\n    c()\n\ndef c():\n    pass\n").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        super::super::build::build(&store, dir.path(), &CodeGraphConfig::default(), true).unwrap();
+
+        let path = run(&store, &GraphQuery::Path("a".into(), "c".into())).unwrap();
+        let names: Vec<&str> = path.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn path_returns_empty_when_unreachable() {
+        let (_dir, store) = build_fixture();
+        let path = run(&store, &GraphQuery::Path("add".into(), "use_add".into())).unwrap();
+        assert!(path.is_empty(), "add doesn't call use_add, no forward path exists");
     }
 
     #[test]

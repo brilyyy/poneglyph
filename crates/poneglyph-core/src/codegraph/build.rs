@@ -9,6 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 
 use crate::config::CodeGraphConfig;
 use crate::model::{CgEdge, CgEdgeKind, CgFile, CgNodeKind};
@@ -35,9 +36,8 @@ pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) 
 
     let mut current_paths = std::collections::HashSet::new();
     let mut report = BuildReport::default();
-    // (file_path, file_language, parsed) for files we re-parsed this run —
-    // edge resolution happens after every file's nodes are persisted.
-    let mut pending: Vec<(String, ParsedFile)> = Vec::new();
+    // (rel_path, language, source, hash) for files that need (re)parsing this run.
+    let mut to_parse: Vec<(String, &'static str, String, String)> = Vec::new();
 
     for path in &candidates {
         let rel = relative_slash_path(root, path);
@@ -59,7 +59,24 @@ pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) 
             continue;
         }
 
-        let parsed = parse::parse_file(&rel, language, &source).with_context(|| format!("failed to parse {rel}"))?;
+        to_parse.push((rel, language, source, hash));
+    }
+
+    // Parsing is CPU-bound and independent per file — runs in parallel across
+    // cores. DB writes below stay serial: a single `rusqlite::Connection` isn't `Sync`.
+    let parsed: Vec<Result<(String, &'static str, String, ParsedFile)>> = to_parse
+        .into_par_iter()
+        .map(|(rel, language, source, hash)| {
+            let parsed = parse::parse_file(&rel, language, &source).with_context(|| format!("failed to parse {rel}"))?;
+            Ok((rel, language, hash, parsed))
+        })
+        .collect();
+
+    // (file_path, parsed) for files we re-parsed this run — edge resolution
+    // happens after every file's nodes are persisted.
+    let mut pending: Vec<(String, ParsedFile)> = Vec::new();
+    for result in parsed {
+        let (rel, language, hash, parsed) = result?;
         store.cg_clear_file(&rel)?;
         store.cg_upsert_file(&CgFile { path: rel.clone(), language: language.to_string(), content_hash: hash })?;
         for node in &parsed.nodes {
@@ -291,6 +308,24 @@ mod tests {
         assert_eq!(report.files_parsed, 0);
         assert!(store.cg_nodes_in_file("a.rs").unwrap().is_empty());
         assert!(store.cg_nodes_in_file("b.rs").unwrap().is_empty());
+    }
+
+    #[test]
+    fn build_parses_many_files_in_parallel_deterministically() {
+        // Parsing now runs via rayon's into_par_iter — this checks the
+        // order-preserving collect still yields correct, stable totals
+        // across many files needing a fresh parse in the same run.
+        let dir = tempdir().unwrap();
+        for i in 0..40 {
+            std::fs::write(dir.path().join(format!("f{i}.rs")), format!("fn f{i}() {{ f{}(); }}\n", (i + 1) % 40)).unwrap();
+        }
+
+        let store = Store::open_in_memory().unwrap();
+        let report = build(&store, dir.path(), &cfg(), true).unwrap();
+
+        assert_eq!(report.files_parsed, 40);
+        assert_eq!(report.nodes, 40);
+        assert_eq!(report.edges, 40, "each file calls exactly one other function");
     }
 
     #[test]

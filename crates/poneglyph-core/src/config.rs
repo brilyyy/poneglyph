@@ -211,6 +211,9 @@ pub struct CodeGraphConfig {
     pub watch_delay_ms: u64,
     /// Max depth for blast-radius analysis.
     pub blast_radius_depth: usize,
+    /// Upper bound on nodes returned per /api/graph or /api/codegraph request
+    /// (the viewer's limit slider can request up to this many).
+    pub max_render_nodes: usize,
 }
 
 impl Default for CodeGraphConfig {
@@ -233,6 +236,7 @@ impl Default for CodeGraphConfig {
             ],
             watch_delay_ms: 2000,
             blast_radius_depth: 5,
+            max_render_nodes: 50_000,
         }
     }
 }
@@ -348,15 +352,9 @@ impl Default for ContextConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnrichmentConfig {
     pub enabled: bool,
-}
-
-impl Default for EnrichmentConfig {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

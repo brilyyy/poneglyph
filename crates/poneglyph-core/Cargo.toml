@@ -8,8 +8,6 @@ tokio           = { workspace = true }
 embed_anything  = { workspace = true }
 rusqlite        = { workspace = true }
 sqlite-vec      = { workspace = true }
-deadpool-sqlite = { workspace = true }
-moka            = { workspace = true }
 async-openai    = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
@@ -34,6 +32,7 @@ tree-sitter-python     = { workspace = true }
 tree-sitter-go         = { workspace = true }
 notify                 = { workspace = true }
 ignore                 = { workspace = true }
+rayon                  = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

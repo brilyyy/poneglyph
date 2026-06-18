@@ -472,7 +472,7 @@ impl PoneglyphMcp {
         }))
     }
 
-    #[tool(description = "Query the code knowledge graph: callers_of:<name>, callees_of:<name>, imports_of:<name>, tests_for:<name>, or a bare keyword search. Requires `poneglyph graph init` to have been run.")]
+    #[tool(description = "Query the code knowledge graph: callers_of:<name>, callees_of:<name>, imports_of:<name>, tests_for:<name>, path:<from>..<to> (shortest call/import chain between two symbols), or a bare keyword search. Requires `poneglyph graph init` to have been run.")]
     pub async fn codegraph_query(
         &self,
         Parameters(req): Parameters<CodegraphQueryRequest>,

@@ -25,7 +25,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Initialize database and config
-    Init,
+    Init {
+        /// Also inject a poneglyph usage block into CLAUDE.md/AGENTS.md/
+        /// .cursorrules in the current directory, for any of those files
+        /// that already exist. Never creates new files.
+        #[arg(long)]
+        inject_rules: bool,
+    },
     /// Start MCP + HTTP servers
     Serve,
     /// Store a memory
@@ -101,7 +107,7 @@ enum GraphCommand {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Structured (callers_of:/callees_of:/imports_of:/tests_for:) or keyword query
+    /// Structured (callers_of:/callees_of:/imports_of:/tests_for:/path:<a>..<b>) or keyword query
     Query {
         q: String,
     },
@@ -139,7 +145,7 @@ async fn main() -> Result<()> {
     let config = load_config(&cli.config)?;
 
     match cli.command {
-        Command::Init => cmd_init(&config),
+        Command::Init { inject_rules } => cmd_init(&config, inject_rules),
         Command::Serve => cmd_serve(&config).await,
         Command::Remember { content, r#type, importance, project, tag } => {
             cmd_remember(&config, &content, &r#type, importance, project.as_deref(), &tag).await
@@ -155,7 +161,7 @@ async fn main() -> Result<()> {
     }
 }
 
-fn cmd_init(config: &Config) -> Result<()> {
+fn cmd_init(config: &Config, inject_rules: bool) -> Result<()> {
     config.ensure_dirs().context("failed to create directories")?;
 
     // Create default config if it doesn't exist: every key present but
@@ -183,6 +189,18 @@ fn cmd_init(config: &Config) -> Result<()> {
     println!("\nAgent integration:");
     for outcome in detect::run_agent_setup(&config.agents, &hooks_dir, &exe)? {
         println!("  {:<14} {}", outcome.agent, outcome.status.as_str());
+    }
+
+    if inject_rules {
+        let project_dir = std::env::current_dir().context("failed to resolve current directory")?;
+        let results = detect::inject_agent_rules(&project_dir)?;
+        println!("\nRule injection:");
+        if results.is_empty() {
+            println!("  no CLAUDE.md / AGENTS.md / .cursorrules found in {}", project_dir.display());
+        }
+        for (name, changed) in results {
+            println!("  {:<14} {}", name, if changed { "updated" } else { "already up to date" });
+        }
     }
 
     Ok(())

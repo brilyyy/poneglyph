@@ -6,6 +6,7 @@ import type {
   ListResponse,
   MemoryDetail,
   Project,
+  ProjectContext,
   SearchHit,
   Stats,
   TimelineResponse,
@@ -87,6 +88,9 @@ export const api = {
   tokenSavings: () => request<TokenSavings>('/api/token-savings'),
 
   agentsStatus: () => request<AgentsStatus>('/api/agents-status'),
+
+  context: (params: { project_path: string; max_tokens?: number }) =>
+    request<ProjectContext>(`/api/context${qs(params)}`),
 }
 
 export function formatDate(iso: string | null): string {

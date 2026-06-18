@@ -10,7 +10,13 @@ import tailwindcss from '@tailwindcss/vite'
 // Build: `vite build` → dist/, embedded into the binary via rust-embed
 // (cargo feature `embed-viewer`; see scripts/build-release.sh).
 const config = defineConfig({
-  resolve: { tsconfigPaths: true },
+  resolve: {
+    tsconfigPaths: true,
+    // gl-bench's "browser" field points to a UMD bundle with no ESM export;
+    // force its "module" (ESM) build instead. Pulled in transitively by
+    // @cosmos.gl/graph's (unused) FPS monitor.
+    alias: { 'gl-bench': 'gl-bench/dist/gl-bench.module.js' },
+  },
   plugins: [
     devtools(),
     tailwindcss(),
