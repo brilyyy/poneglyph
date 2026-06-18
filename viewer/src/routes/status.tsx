@@ -1,11 +1,14 @@
+import { useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 
 import { api } from '#/lib/api.ts'
-import type { AgentsStatus } from '#/lib/types.ts'
+import type { AgentsStatus, ProjectContext } from '#/lib/types.ts'
 import { Alert, AlertDescription } from '#/components/ui/alert.tsx'
 import { Badge } from '#/components/ui/badge.tsx'
+import { Button } from '#/components/ui/button.tsx'
 import { Card, CardContent, CardHeader, CardTitle } from '#/components/ui/card.tsx'
+import { Input } from '#/components/ui/input.tsx'
 import { Spinner } from '#/components/ui/spinner.tsx'
 
 export const Route = createFileRoute('/status')({ component: StatusPage })
@@ -90,7 +93,83 @@ function StatusPage() {
           <Row label="Compression" value={settings.data?.memory?.compression_enabled ? 'on' : 'off'} />
         </CardContent>
       </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Graph coverage</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1 text-sm text-muted-foreground">
+          <p>
+            The graph &amp; code graph views sample by default (the totals above are always exact, regardless of the
+            render-limit slider on each view).
+          </p>
+          <p>Visually encoded: node color ← type/kind · node size ← importance (memory) / connection count (code).</p>
+          <p>Memory graph also encodes: opacity ← tier (hot/warm/cold) · link width ← edge weight.</p>
+          <p>Not yet encoded: access_count, is_decoy, strength.</p>
+        </CardContent>
+      </Card>
+
+      <ProjectContextPreview />
     </div>
+  )
+}
+
+function ProjectContextPreview() {
+  const [path, setPath] = useState('')
+  const [result, setResult] = useState<ProjectContext | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const load = async () => {
+    if (!path.trim()) return
+    setLoading(true)
+    setError(null)
+    try {
+      setResult(await api.context({ project_path: path.trim() }))
+    } catch (e) {
+      setError(String(e))
+      setResult(null)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Project context preview</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          Preview the ranked context string injected into agent sessions at start (via{' '}
+          <code>/api/context</code>) — not surfaced anywhere else in the dashboard.
+        </p>
+        <div className="flex gap-2">
+          <Input
+            placeholder="/path/to/project"
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void load()}
+          />
+          <Button onClick={() => void load()} disabled={loading || !path.trim()}>
+            {loading ? <Spinner /> : 'Load'}
+          </Button>
+        </div>
+        {error && (
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        {result && (
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground">{result.memory_count} memories included</p>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-xs">
+              {result.context || '(empty)'}
+            </pre>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 

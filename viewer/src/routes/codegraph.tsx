@@ -1,37 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import {
-  applyNodeChanges,
-  Background,
-  Controls,
-  MiniMap,
-  ReactFlow,
-  useNodesState,
-  type Edge as FlowEdge,
-  type Node as FlowNode,
-  type OnNodesChange,
-} from '@xyflow/react'
-import '@xyflow/react/dist/style.css'
-import {
-  forceCollide,
-  forceLink,
-  forceManyBody,
-  forceSimulation,
-  forceX,
-  forceY,
-  type Simulation,
-  type SimulationNodeDatum,
-} from 'd3-force'
 
 import { api } from '#/lib/api.ts'
-import { getTheme } from '#/lib/theme.ts'
 import { CG_NODE_COLORS, type CgEdge, type CgEdgeKind, type CgNode, type CgNodeKind } from '#/lib/types.ts'
 import { Alert, AlertDescription } from '#/components/ui/alert.tsx'
 import { Card, CardContent } from '#/components/ui/card.tsx'
 import { Empty, EmptyDescription, EmptyTitle } from '#/components/ui/empty.tsx'
 import { Spinner } from '#/components/ui/spinner.tsx'
-import FloatingEdge from '#/components/floating-edge.tsx'
+import { CosmosGraph, type CosmosLink, type CosmosNode } from '#/components/cosmos-graph.tsx'
 
 type CodegraphSearch = { focus?: string }
 
@@ -42,12 +19,6 @@ export const Route = createFileRoute('/codegraph')({
   component: CodegraphPage,
 })
 
-interface SimNode extends SimulationNodeDatum {
-  id: string
-}
-
-const edgeTypes = { floating: FloatingEdge }
-const NODE_W = 170
 const KIND_LABEL: Record<CgNodeKind, string> = {
   function: 'fn',
   method: 'method',
@@ -62,90 +33,23 @@ function edgeId(e: CgEdge): string {
 
 function CodegraphPage() {
   const { focus } = Route.useSearch()
+  const [limit, setLimit] = useState(500)
   const [nodes, setNodesMap] = useState<Map<string, CgNode>>(new Map())
   const [edges, setEdgesMap] = useState<Map<string, CgEdge>>(new Map())
   const [hidden, setHidden] = useState<Set<CgEdgeKind>>(new Set())
   const [selected, setSelected] = useState<CgNode | null>(null)
 
-  const simNodesRef = useRef<Map<string, SimNode>>(new Map())
-  const simRef = useRef<Simulation<SimNode, CgEdge> | null>(null)
-  const rafRef = useRef<number>(0)
-
   const initial = useQuery({
-    queryKey: ['codegraph', focus ?? 'all'],
-    queryFn: () => (focus ? api.codegraph({ focus, depth: 2 }) : api.codegraph({ limit: 500 })),
+    queryKey: ['codegraph', focus ?? 'all', limit],
+    queryFn: () => (focus ? api.codegraph({ focus, depth: 2 }) : api.codegraph({ limit })),
   })
 
   useEffect(() => {
     if (!initial.data) return
-    simNodesRef.current = new Map()
     setNodesMap(new Map(initial.data.nodes.map((n) => [n.id, n])))
     setEdgesMap(new Map(initial.data.edges.map((e) => [edgeId(e), e])))
     setSelected(null)
   }, [initial.data])
-
-  useEffect(() => {
-    const nodeArr = [...nodes.values()]
-    const edgeArr = [...edges.values()]
-
-    for (const n of nodeArr) {
-      if (!simNodesRef.current.has(n.id)) {
-        const existing = simNodesRef.current.size
-        simNodesRef.current.set(n.id, {
-          id: n.id,
-          x: existing > 0 ? (Math.random() - 0.5) * 80 : 0,
-          y: existing > 0 ? (Math.random() - 0.5) * 80 : 0,
-        })
-      }
-    }
-
-    const simNodes: SimNode[] = nodeArr.map((n) => simNodesRef.current.get(n.id)!).filter(Boolean)
-    const simLinks = edgeArr.map((e) => ({ source: e.src_id, target: e.dst_id }))
-
-    if (!simRef.current) {
-      simRef.current = forceSimulation<SimNode>(simNodes)
-        .force(
-          'link',
-          forceLink<SimNode, { source: string; target: string }>(simLinks).id((d) => d.id).distance(160).strength(0.3),
-        )
-        .force('charge', forceManyBody<SimNode>().strength(-350).distanceMax(600))
-        .force('x', forceX<SimNode>(0).strength(0.05))
-        .force('y', forceY<SimNode>(0).strength(0.05))
-        .force('collide', forceCollide<SimNode>(90).strength(0.9).iterations(2))
-        .alphaDecay(0.03)
-        .velocityDecay(0.4)
-    } else {
-      simRef.current.nodes(simNodes)
-      const linkForce = simRef.current.force('link') as ReturnType<typeof forceLink>
-      if (linkForce) {
-        linkForce.links(simLinks)
-        linkForce.id((d: any) => d.id)
-      }
-      simRef.current.alpha(0.4).restart()
-    }
-
-    simRef.current.on('tick', () => {
-      if (rafRef.current) return
-      rafRef.current = requestAnimationFrame(() => {
-        rafRef.current = 0
-        setFlowNodes((prev) =>
-          prev.map((n) => {
-            const sn = simNodesRef.current.get(n.id)
-            return sn ? { ...n, position: { x: sn.x ?? 0, y: sn.y ?? 0 } } : n
-          }),
-        )
-      })
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges])
-
-  useEffect(() => {
-    return () => {
-      simRef.current?.stop()
-      simRef.current = null
-      if (rafRef.current) cancelAnimationFrame(rafRef.current)
-    }
-  }, [])
 
   const merge = useCallback((newNodes: CgNode[], newEdges: CgEdge[]) => {
     setNodesMap((prev) => {
@@ -175,56 +79,30 @@ function CodegraphPage() {
   const nodeArr = useMemo(() => [...nodes.values()], [nodes])
   const edgeArr = useMemo(() => [...edges.values()], [edges])
 
-  const baseFlowNodes: FlowNode[] = useMemo(
+  // Fan-out (call/import/test degree) isn't shown anywhere in the old DOM
+  // cards — size by it here so hot-spot symbols stand out at a glance.
+  const degree = useMemo(() => {
+    const d = new Map<string, number>()
+    for (const e of edgeArr) {
+      d.set(e.src_id, (d.get(e.src_id) ?? 0) + 1)
+      d.set(e.dst_id, (d.get(e.dst_id) ?? 0) + 1)
+    }
+    return d
+  }, [edgeArr])
+
+  const cosmosNodes: CosmosNode[] = useMemo(
     () =>
-      nodeArr.map((n) => {
-        const sn = simNodesRef.current.get(n.id)
-        return {
-          id: n.id,
-          position: { x: sn?.x ?? 0, y: sn?.y ?? 0 },
-          data: { label: `${KIND_LABEL[n.kind]} ${n.name}` },
-          style: {
-            backgroundColor: `${CG_NODE_COLORS[n.kind]}33`,
-            borderColor: CG_NODE_COLORS[n.kind],
-            borderWidth: 2,
-            borderRadius: 10,
-            fontSize: 11,
-            width: NODE_W,
-            padding: 6,
-          },
-        }
-      }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodeArr.length],
-  )
-
-  const [flowNodes, setFlowNodes] = useNodesState(baseFlowNodes)
-
-  useEffect(() => {
-    setFlowNodes((prev) => {
-      const prevIds = new Set(prev.map((n) => n.id))
-      const nextIds = new Set(baseFlowNodes.map((n) => n.id))
-      if (prevIds.size === nextIds.size && [...prevIds].every((id) => nextIds.has(id))) return prev
-      return baseFlowNodes
-    })
-  }, [baseFlowNodes, setFlowNodes])
-
-  const flowEdges: FlowEdge[] = useMemo(
-    () =>
-      edgeArr.map((e) => ({
-        id: edgeId(e),
-        source: e.src_id,
-        target: e.dst_id,
-        type: 'floating' as const,
-        hidden: hidden.has(e.kind),
-        label: e.kind,
+      nodeArr.map((n) => ({
+        id: n.id,
+        color: CG_NODE_COLORS[n.kind],
+        size: 3 + Math.min(degree.get(n.id) ?? 0, 20) * 0.6,
       })),
-    [edgeArr, hidden],
+    [nodeArr, degree],
   )
 
-  const onNodesChange: OnNodesChange = useCallback(
-    (changes) => setFlowNodes((nds) => applyNodeChanges(changes, nds)),
-    [setFlowNodes],
+  const cosmosLinks: CosmosLink[] = useMemo(
+    () => edgeArr.filter((e) => !hidden.has(e.kind)).map((e) => ({ source: e.src_id, target: e.dst_id })),
+    [edgeArr, hidden],
   )
 
   if (initial.isLoading)
@@ -249,12 +127,17 @@ function CodegraphPage() {
       </Empty>
     )
 
+  const totalNodes = initial.data?.total_nodes ?? nodeArr.length
+  const totalEdges = initial.data?.total_edges ?? edgeArr.length
+  const isSampled = totalNodes > nodeArr.length
+
   return (
     <div className="flex h-[calc(100vh-3rem)] flex-col gap-3">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Code graph</h1>
         <span className="text-sm text-muted-foreground">
-          {nodeArr.length} nodes · {edgeArr.length} edges · click a node to expand
+          showing {nodeArr.length} of {totalNodes} nodes · {edgeArr.length} of {totalEdges} edges
+          {isSampled ? ' (sampled)' : ''} · click a node to expand
         </span>
       </div>
 
@@ -287,30 +170,31 @@ function CodegraphPage() {
             </label>
           ))}
         </div>
+        <label className="flex items-center gap-2 border-l border-border pl-4 text-muted-foreground">
+          render limit: {limit}
+          <input
+            type="range"
+            min={100}
+            max={Math.max(2000, totalNodes)}
+            step={100}
+            value={limit}
+            onChange={(e) => setLimit(Number(e.target.value))}
+            className="w-40 accent-primary"
+          />
+        </label>
       </div>
 
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-card">
-        <ReactFlow
-          nodes={flowNodes}
-          edges={flowEdges}
-          edgeTypes={edgeTypes}
-          fitView
-          minZoom={0.05}
-          onlyRenderVisibleElements
-          nodesConnectable={false}
-          colorMode={getTheme()}
-          onNodeClick={(_, n) => {
-            const node = nodes.get(n.id) ?? null
+        <CosmosGraph
+          nodes={cosmosNodes}
+          links={cosmosLinks}
+          onNodeClick={(id) => {
+            const node = nodes.get(id) ?? null
             setSelected(node)
-            if (node) expand(node)
+            if (node) void expand(node)
           }}
-          onPaneClick={() => setSelected(null)}
-          onNodesChange={onNodesChange}
-        >
-          <Background />
-          <Controls />
-          <MiniMap pannable zoomable nodeColor={(n) => CG_NODE_COLORS[nodes.get(n.id)?.kind ?? 'function']} />
-        </ReactFlow>
+          onBackgroundClick={() => setSelected(null)}
+        />
 
         {selected && (
           <Card className="absolute right-3 top-3 w-80 shadow-lg">
@@ -324,6 +208,8 @@ function CodegraphPage() {
               <p className="text-xs text-muted-foreground">
                 {KIND_LABEL[selected.kind]} · {selected.file_path}:{selected.start_line}
                 {selected.end_line !== selected.start_line ? `-${selected.end_line}` : ''}
+                {' · '}
+                {degree.get(selected.id) ?? 0} connections
               </p>
             </CardContent>
           </Card>
