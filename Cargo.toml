@@ -48,6 +48,13 @@ moka = { version = "0.12", features = ["future"] }
 # Optional LLM calls (OpenAI-compatible endpoint)
 async-openai = { version = "0.27" }
 
+# Direct HTTP for non-OpenAI-compat providers (Anthropic, Gemini, Ollama embeddings)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Privacy: redaction_tags / exclude_paths glob matching
+regex   = { version = "1" }
+globset = { version = "0.4" }
+
 # Static viewer embedding
 rust-embed = { version = "8", features = ["axum"] }
 
@@ -82,6 +89,16 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Graph algorithms (viewer only, optional)
 petgraph = { version = "0.6" }
+
+# Code knowledge graph (Tree-sitter)
+tree-sitter            = { version = "0.25" }
+tree-sitter-rust       = { version = "0.24" }
+tree-sitter-typescript = { version = "0.23" }
+tree-sitter-javascript = { version = "0.23" }
+tree-sitter-python     = { version = "0.23" }
+tree-sitter-go         = { version = "0.23" }
+notify                 = { version = "6" }
+ignore                 = { version = "0.4" }
 
 # Internal crates
 poneglyph-core = { path = "crates/poneglyph-core" }

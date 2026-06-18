@@ -7,7 +7,7 @@ use tracing::info;
 use uuid::Uuid;
 use crate::model::*;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Max ids per SQL `IN (...)` list — stays under SQLite's default 999-param limit.
 const SQL_IN_CHUNK: usize = 900;
@@ -123,6 +123,48 @@ CREATE INDEX IF NOT EXISTS idx_mem_strength ON memories(strength);
 CREATE INDEX IF NOT EXISTS idx_mem_decoy    ON memories(is_decoy);
 "#;
 
+// Code knowledge graph (Tree-sitter). Distinct from the `edges` table above
+// (memory-linkage similarity/temporal/tag edges).
+const DDL_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS cg_files (
+    path          TEXT PRIMARY KEY,
+    language      TEXT NOT NULL,
+    content_hash  TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cg_nodes (
+    id          TEXT PRIMARY KEY,
+    file_path   TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    start_line  INTEGER NOT NULL,
+    end_line    INTEGER NOT NULL,
+    FOREIGN KEY (file_path) REFERENCES cg_files(path) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_cg_nodes_file ON cg_nodes(file_path);
+CREATE INDEX IF NOT EXISTS idx_cg_nodes_name ON cg_nodes(name);
+
+CREATE TABLE IF NOT EXISTS cg_edges (
+    src_id  TEXT NOT NULL,
+    dst_id  TEXT NOT NULL,
+    kind    TEXT NOT NULL,
+    PRIMARY KEY (src_id, dst_id, kind),
+    FOREIGN KEY (src_id) REFERENCES cg_nodes(id) ON DELETE CASCADE,
+    FOREIGN KEY (dst_id) REFERENCES cg_nodes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_cg_edges_src ON cg_edges(src_id);
+CREATE INDEX IF NOT EXISTS idx_cg_edges_dst ON cg_edges(dst_id);
+"#;
+
+// Compression cache. `compressed_content` is never read by recall/FTS/vector
+// search — only by context-injection (project::get_project_context), which
+// falls back to `content` when absent. `content` itself is never overwritten.
+const DDL_V4: &str = r#"
+ALTER TABLE memories ADD COLUMN compressed_content TEXT;
+ALTER TABLE memories ADD COLUMN compression_mode    TEXT;
+"#;
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -185,6 +227,24 @@ impl Store {
                 [],
             )?;
             info!(version = 2, "schema migrated");
+        }
+
+        if version < 3 {
+            self.conn.execute_batch(DDL_V3).context("DDL v3 failed")?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '3')",
+                [],
+            )?;
+            info!(version = 3, "schema migrated");
+        }
+
+        if version < 4 {
+            self.conn.execute_batch(DDL_V4).context("DDL v4 failed")?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '4')",
+                [],
+            )?;
+            info!(version = 4, "schema migrated");
         }
 
         Ok(())
@@ -448,6 +508,38 @@ impl Store {
             params![importance.clamp(0.0, 1.0), now, id],
         )?;
         Ok(updated > 0)
+    }
+
+    /// Cache a token-reduced rewrite for context injection. Never touches
+    /// `content` — recall/FTS/vector search must keep reading the original.
+    pub fn set_compressed_content(&self, id: &str, text: &str, mode: &str) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE memories SET compressed_content = ?1, compression_mode = ?2 WHERE id = ?3",
+            params![text, mode, id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Drop a stale compressed rewrite — call when `content` changes so
+    /// context-injection doesn't serve text for the previous edit.
+    pub fn clear_compressed_content(&self, id: &str) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE memories SET compressed_content = NULL, compression_mode = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    pub fn get_compressed_content(&self, id: &str) -> Result<Option<(String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT compressed_content, compression_mode FROM memories \
+                 WHERE id = ?1 AND compressed_content IS NOT NULL",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e.into()) })
     }
 
     pub fn update_memory(&self, id: &str, new_content: &str) -> Result<bool> {
@@ -1133,6 +1225,214 @@ impl Store {
 }
 
 // ---------------------------------------------------------------------------
+// Code knowledge graph (Tree-sitter)
+// ---------------------------------------------------------------------------
+
+impl Store {
+    pub fn cg_file_hash(&self, path: &str) -> Result<Option<String>> {
+        match self.conn.query_row("SELECT content_hash FROM cg_files WHERE path = ?1", params![path], |r| r.get(0)) {
+            Ok(hash) => Ok(Some(hash)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// All nodes across every file in one query — the no-focus dashboard
+    /// path used to loop `cg_nodes_in_file` once per `cg_all_files` entry
+    /// (N+1); `cg_nodes.file_path` already denormalizes the path so a plain
+    /// `SELECT` is all that's needed.
+    pub fn cg_all_nodes(&self, limit: Option<usize>) -> Result<Vec<CgNode>> {
+        let sql = match limit {
+            Some(n) => format!("SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes LIMIT {n}"),
+            None => "SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes".to_string(),
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let nodes = stmt.query_map([], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    pub fn cg_all_files(&self) -> Result<Vec<CgFile>> {
+        let mut stmt = self.conn.prepare("SELECT path, language, content_hash FROM cg_files")?;
+        let files = stmt
+            .query_map([], |r| Ok(CgFile { path: r.get(0)?, language: r.get(1)?, content_hash: r.get(2)? }))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(files)
+    }
+
+    /// Remove a file's nodes/edges (cascade) and its `cg_files` row, e.g.
+    /// before re-inserting fresh parse results or when the file is deleted.
+    pub fn cg_clear_file(&self, path: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM cg_files WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+
+    pub fn cg_upsert_file(&self, file: &CgFile) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO cg_files (path, language, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET language = ?2, content_hash = ?3, updated_at = ?4",
+            params![file.path, file.language, file.content_hash, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn cg_insert_node(&self, node: &CgNode) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO cg_nodes (id, file_path, kind, name, start_line, end_line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![node.id, node.file_path, node.kind.to_string(), node.name, node.start_line, node.end_line],
+        )?;
+        Ok(())
+    }
+
+    /// Returns whether a new row was inserted (false if this exact edge
+    /// already existed) — callers use this to report accurate edge counts.
+    pub fn cg_insert_edge(&self, edge: &CgEdge) -> Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO cg_edges (src_id, dst_id, kind) VALUES (?1, ?2, ?3)",
+            params![edge.src_id, edge.dst_id, edge.kind.to_string()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn cg_node(&self, id: &str) -> Result<Option<CgNode>> {
+        let result = self.conn.query_row(
+            "SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes WHERE id = ?1",
+            params![id],
+            row_to_cg_node,
+        );
+        match result {
+            Ok(n) => Ok(Some(n)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// All nodes with an exact name match, across every file. Used to
+    /// resolve call/test references found during parsing.
+    pub fn cg_nodes_by_name(&self, name: &str, kinds: &[CgNodeKind]) -> Result<Vec<CgNode>> {
+        let kind_list = kinds.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes WHERE name = ?1 AND kind IN ({kind_list})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let nodes = stmt.query_map(params![name], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    pub fn cg_nodes_in_file(&self, path: &str) -> Result<Vec<CgNode>> {
+        let mut stmt =
+            self.conn.prepare("SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes WHERE file_path = ?1")?;
+        let nodes = stmt.query_map(params![path], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    /// Keyword search by substring, case-insensitive.
+    pub fn cg_search_by_name(&self, keyword: &str, limit: usize) -> Result<Vec<CgNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes
+             WHERE name LIKE ?1 ESCAPE '\\' ORDER BY name LIMIT ?2",
+        )?;
+        let pattern = format!("%{}%", escape_like(keyword));
+        let nodes = stmt.query_map(params![pattern, limit as i64], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    /// Nodes reached by edges of `kind` pointing *into* `node_id` (e.g. who
+    /// calls this, who imports this, who tests this).
+    pub fn cg_edges_into(&self, node_id: &str, kind: CgEdgeKind) -> Result<Vec<CgNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, n.file_path, n.kind, n.name, n.start_line, n.end_line
+             FROM cg_edges e JOIN cg_nodes n ON n.id = e.src_id
+             WHERE e.dst_id = ?1 AND e.kind = ?2",
+        )?;
+        let nodes = stmt.query_map(params![node_id, kind.to_string()], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    /// Nodes reached by edges of `kind` pointing *out of* `node_id` (e.g.
+    /// what this calls).
+    pub fn cg_edges_out_of(&self, node_id: &str, kind: CgEdgeKind) -> Result<Vec<CgNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, n.file_path, n.kind, n.name, n.start_line, n.end_line
+             FROM cg_edges e JOIN cg_nodes n ON n.id = e.dst_id
+             WHERE e.src_id = ?1 AND e.kind = ?2",
+        )?;
+        let nodes = stmt.query_map(params![node_id, kind.to_string()], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
+        Ok(nodes)
+    }
+
+    /// Edges with both endpoints in `ids` — used by the focus/blast-radius
+    /// dashboard path so it never has to load every edge in the DB just to
+    /// filter most of them out in memory.
+    pub fn cg_edges_for_nodes(&self, ids: &[String]) -> Result<Vec<CgEdge>> {
+        use std::collections::HashSet;
+        let id_set: HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let mut edges = Vec::new();
+        for chunk in ids.chunks(SQL_IN_CHUNK) {
+            let ph: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+            let sql = format!("SELECT src_id, dst_id, kind FROM cg_edges WHERE src_id IN ({})", ph.join(", "));
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let found = stmt
+                .query_map(params_refs.as_slice(), |row| {
+                    let kind: String = row.get(2)?;
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, kind))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (src_id, dst_id, kind) in found {
+                if id_set.contains(dst_id.as_str()) {
+                    edges.push(CgEdge { src_id, dst_id, kind: kind.parse().map_err(|e: anyhow::Error| anyhow::anyhow!(e))? });
+                }
+            }
+        }
+        Ok(edges)
+    }
+
+    pub fn cg_all_edges(&self) -> Result<Vec<CgEdge>> {
+        let mut stmt = self.conn.prepare("SELECT src_id, dst_id, kind FROM cg_edges")?;
+        let edges = stmt
+            .query_map([], |r| {
+                let kind: String = r.get(2)?;
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, kind))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        edges
+            .into_iter()
+            .map(|(src_id, dst_id, kind)| {
+                Ok(CgEdge { src_id, dst_id, kind: kind.parse().map_err(|e: anyhow::Error| anyhow::anyhow!(e))? })
+            })
+            .collect()
+    }
+
+    pub fn cg_stats(&self) -> Result<(i64, i64, i64)> {
+        let files: i64 = self.conn.query_row("SELECT COUNT(*) FROM cg_files", [], |r| r.get(0))?;
+        let nodes: i64 = self.conn.query_row("SELECT COUNT(*) FROM cg_nodes", [], |r| r.get(0))?;
+        let edges: i64 = self.conn.query_row("SELECT COUNT(*) FROM cg_edges", [], |r| r.get(0))?;
+        Ok((files, nodes, edges))
+    }
+}
+
+fn row_to_cg_node(row: &rusqlite::Row) -> rusqlite::Result<CgNode> {
+    let kind: String = row.get(2)?;
+    Ok(CgNode {
+        id: row.get(0)?,
+        file_path: row.get(1)?,
+        kind: kind.parse().map_err(|e: anyhow::Error| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, e.into())
+        })?,
+        name: row.get(3)?,
+        start_line: row.get(4)?,
+        end_line: row.get(5)?,
+    })
+}
+
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+// ---------------------------------------------------------------------------
 // SessionGroup
 // ---------------------------------------------------------------------------
 
@@ -1605,6 +1905,44 @@ mod tests {
     }
 
     #[test]
+    fn compressed_content_round_trips() {
+        let store = test_store();
+        let m = store.create_memory("hello world", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+
+        assert!(store.get_compressed_content(&m.id).unwrap().is_none());
+
+        store.set_compressed_content(&m.id, "h3ll0 w0rld", "caveman").unwrap();
+        let (text, mode) = store.get_compressed_content(&m.id).unwrap().unwrap();
+        assert_eq!(text, "h3ll0 w0rld");
+        assert_eq!(mode, "caveman");
+
+        // content itself must be untouched.
+        let mem = store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(mem.content, "hello world");
+
+        store.clear_compressed_content(&m.id).unwrap();
+        assert!(store.get_compressed_content(&m.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn schema_version_is_4_with_compression_columns() {
+        let store = test_store();
+        assert_eq!(SCHEMA_VERSION, 4);
+        let m = store.create_memory("x", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        // Columns exist and are queryable (NULL until set).
+        let (compressed, mode): (Option<String>, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT compressed_content, compression_mode FROM memories WHERE id = ?1",
+                params![m.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(compressed.is_none());
+        assert!(mode.is_none());
+    }
+
+    #[test]
     fn delete_memory_cascades_edges() {
         let store = test_store();
         let a = store.create_memory("a", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
@@ -1636,5 +1974,42 @@ mod tests {
         let (nodes, edges) = result.unwrap();
         assert!(nodes.is_empty());
         assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn cg_all_nodes_returns_nodes_across_files() {
+        let store = test_store();
+        store.cg_upsert_file(&CgFile { path: "a.rs".into(), language: "rust".into(), content_hash: "h1".into() }).unwrap();
+        store.cg_upsert_file(&CgFile { path: "b.rs".into(), language: "rust".into(), content_hash: "h2".into() }).unwrap();
+        store
+            .cg_insert_node(&CgNode { id: "a#1:a".into(), file_path: "a.rs".into(), kind: CgNodeKind::Function, name: "a".into(), start_line: 1, end_line: 1 })
+            .unwrap();
+        store
+            .cg_insert_node(&CgNode { id: "b#1:b".into(), file_path: "b.rs".into(), kind: CgNodeKind::Function, name: "b".into(), start_line: 1, end_line: 1 })
+            .unwrap();
+
+        let nodes = store.cg_all_nodes(None).unwrap();
+        assert_eq!(nodes.len(), 2);
+
+        let capped = store.cg_all_nodes(Some(1)).unwrap();
+        assert_eq!(capped.len(), 1);
+    }
+
+    #[test]
+    fn cg_edges_for_nodes_excludes_edges_with_endpoint_outside_set() {
+        let store = test_store();
+        store.cg_upsert_file(&CgFile { path: "a.rs".into(), language: "rust".into(), content_hash: "h1".into() }).unwrap();
+        for (id, name) in [("a#1:a", "a"), ("a#2:b", "b"), ("a#3:c", "c")] {
+            store
+                .cg_insert_node(&CgNode { id: id.into(), file_path: "a.rs".into(), kind: CgNodeKind::Function, name: name.into(), start_line: 1, end_line: 1 })
+                .unwrap();
+        }
+        store.cg_insert_edge(&CgEdge { src_id: "a#1:a".into(), dst_id: "a#2:b".into(), kind: CgEdgeKind::Calls }).unwrap();
+        store.cg_insert_edge(&CgEdge { src_id: "a#1:a".into(), dst_id: "a#3:c".into(), kind: CgEdgeKind::Calls }).unwrap();
+
+        // Only a and b are "in view" — the edge to c must be excluded.
+        let edges = store.cg_edges_for_nodes(&["a#1:a".to_string(), "a#2:b".to_string()]).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].dst_id, "a#2:b");
     }
 }

@@ -26,6 +26,11 @@
 # Embedded model cache (downloaded at runtime)
 models/
 
+# npm package (root) — downloaded binary + node deps
+/node_modules/
+/bin/poneglyph
+/bin/poneglyph.exe
+
 # Test artifacts
 /tests/tmp/
 

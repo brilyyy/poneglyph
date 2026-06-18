@@ -9,17 +9,30 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as TokenSavingsRouteImport } from './routes/token-savings'
 import { Route as TimelineRouteImport } from './routes/timeline'
+import { Route as StatusRouteImport } from './routes/status'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as SearchRouteImport } from './routes/search'
 import { Route as GraphRouteImport } from './routes/graph'
+import { Route as CodegraphRouteImport } from './routes/codegraph'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as MemoriesIndexRouteImport } from './routes/memories.index'
 import { Route as MemoriesIdRouteImport } from './routes/memories.$id'
 
+const TokenSavingsRoute = TokenSavingsRouteImport.update({
+  id: '/token-savings',
+  path: '/token-savings',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const TimelineRoute = TimelineRouteImport.update({
   id: '/timeline',
   path: '/timeline',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const StatusRoute = StatusRouteImport.update({
+  id: '/status',
+  path: '/status',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsRoute = SettingsRouteImport.update({
@@ -35,6 +48,11 @@ const SearchRoute = SearchRouteImport.update({
 const GraphRoute = GraphRouteImport.update({
   id: '/graph',
   path: '/graph',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CodegraphRoute = CodegraphRouteImport.update({
+  id: '/codegraph',
+  path: '/codegraph',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -55,29 +73,38 @@ const MemoriesIdRoute = MemoriesIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/codegraph': typeof CodegraphRoute
   '/graph': typeof GraphRoute
   '/search': typeof SearchRoute
   '/settings': typeof SettingsRoute
+  '/status': typeof StatusRoute
   '/timeline': typeof TimelineRoute
+  '/token-savings': typeof TokenSavingsRoute
   '/memories/$id': typeof MemoriesIdRoute
   '/memories/': typeof MemoriesIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/codegraph': typeof CodegraphRoute
   '/graph': typeof GraphRoute
   '/search': typeof SearchRoute
   '/settings': typeof SettingsRoute
+  '/status': typeof StatusRoute
   '/timeline': typeof TimelineRoute
+  '/token-savings': typeof TokenSavingsRoute
   '/memories/$id': typeof MemoriesIdRoute
   '/memories': typeof MemoriesIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/codegraph': typeof CodegraphRoute
   '/graph': typeof GraphRoute
   '/search': typeof SearchRoute
   '/settings': typeof SettingsRoute
+  '/status': typeof StatusRoute
   '/timeline': typeof TimelineRoute
+  '/token-savings': typeof TokenSavingsRoute
   '/memories/$id': typeof MemoriesIdRoute
   '/memories/': typeof MemoriesIndexRoute
 }
@@ -85,49 +112,75 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/codegraph'
     | '/graph'
     | '/search'
     | '/settings'
+    | '/status'
     | '/timeline'
+    | '/token-savings'
     | '/memories/$id'
     | '/memories/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/codegraph'
     | '/graph'
     | '/search'
     | '/settings'
+    | '/status'
     | '/timeline'
+    | '/token-savings'
     | '/memories/$id'
     | '/memories'
   id:
     | '__root__'
     | '/'
+    | '/codegraph'
     | '/graph'
     | '/search'
     | '/settings'
+    | '/status'
     | '/timeline'
+    | '/token-savings'
     | '/memories/$id'
     | '/memories/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  CodegraphRoute: typeof CodegraphRoute
   GraphRoute: typeof GraphRoute
   SearchRoute: typeof SearchRoute
   SettingsRoute: typeof SettingsRoute
+  StatusRoute: typeof StatusRoute
   TimelineRoute: typeof TimelineRoute
+  TokenSavingsRoute: typeof TokenSavingsRoute
   MemoriesIdRoute: typeof MemoriesIdRoute
   MemoriesIndexRoute: typeof MemoriesIndexRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/token-savings': {
+      id: '/token-savings'
+      path: '/token-savings'
+      fullPath: '/token-savings'
+      preLoaderRoute: typeof TokenSavingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/timeline': {
       id: '/timeline'
       path: '/timeline'
       fullPath: '/timeline'
       preLoaderRoute: typeof TimelineRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/status': {
+      id: '/status'
+      path: '/status'
+      fullPath: '/status'
+      preLoaderRoute: typeof StatusRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/settings': {
@@ -149,6 +202,13 @@ declare module '@tanstack/react-router' {
       path: '/graph'
       fullPath: '/graph'
       preLoaderRoute: typeof GraphRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/codegraph': {
+      id: '/codegraph'
+      path: '/codegraph'
+      fullPath: '/codegraph'
+      preLoaderRoute: typeof CodegraphRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -177,10 +237,13 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  CodegraphRoute: CodegraphRoute,
   GraphRoute: GraphRoute,
   SearchRoute: SearchRoute,
   SettingsRoute: SettingsRoute,
+  StatusRoute: StatusRoute,
   TimelineRoute: TimelineRoute,
+  TokenSavingsRoute: TokenSavingsRoute,
   MemoriesIdRoute: MemoriesIdRoute,
   MemoriesIndexRoute: MemoriesIndexRoute,
 }

@@ -397,7 +397,7 @@ async fn stats_and_projects() {
 #[tokio::test]
 async fn settings_get_hides_secrets() {
     let mut config = Config::default();
-    config.server.api_token = Some("super-secret".into());
+    config.dashboard.token = Some("super-secret".into());
     config.llm.api_key = Some("sk-xyz".into());
     let (state, _) = test_state(config);
     let router = build_router(state);
@@ -409,8 +409,8 @@ async fn settings_get_hides_secrets() {
         .unwrap();
     let (status, body) = send(router, req).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["server"]["api_token_set"], true);
-    assert!(body["server"].get("api_token").is_none());
+    assert_eq!(body["dashboard"]["token_set"], true);
+    assert!(body["dashboard"].get("token").is_none());
     assert_eq!(body["llm"]["api_key_set"], true);
     assert!(body["llm"].get("api_key").is_none());
     // Body must never contain the secret values anywhere.
@@ -425,11 +425,11 @@ async fn settings_patch_rejects_non_whitelisted() {
 
     let (status, body) = send(
         router.clone(),
-        json_req("PATCH", "/api/settings", json!({"server": {"api_token": "evil"}})),
+        json_req("PATCH", "/api/settings", json!({"dashboard": {"token": "evil"}})),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap().contains("server.api_token"));
+    assert!(body["error"].as_str().unwrap().contains("dashboard.token"));
 
     let (status, _) = send(
         router,
@@ -446,7 +446,7 @@ async fn settings_patch_rejects_non_whitelisted() {
 #[tokio::test]
 async fn auth_required_when_token_set() {
     let mut config = Config::default();
-    config.server.api_token = Some("tok".into());
+    config.dashboard.token = Some("tok".into());
     let (state, _) = test_state(config);
     let router = build_router(state);
 
@@ -507,19 +507,19 @@ fn validate_security_rules() {
 
     // Non-loopback without token: refused.
     let mut config = Config::default();
-    config.server.bind_addr = "0.0.0.0".into();
+    config.dashboard.host = "0.0.0.0".into();
     assert!(validate_security(&config).is_err());
 
     // Whitespace-only token doesn't count.
-    config.server.api_token = Some("   ".into());
+    config.dashboard.token = Some("   ".into());
     assert!(validate_security(&config).is_err());
 
     // Non-loopback with real token: fine.
-    config.server.api_token = Some("tok".into());
+    config.dashboard.token = Some("tok".into());
     assert!(validate_security(&config).is_ok());
 
     // Garbage bind addr: refused.
-    config.server.bind_addr = "not-an-ip".into();
+    config.dashboard.host = "not-an-ip".into();
     assert!(validate_security(&config).is_err());
 }
 
@@ -599,4 +599,116 @@ async fn ingest_hoists_session_id_to_top_level() {
     assert_eq!(status, StatusCode::OK);
     let sessions = body["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// /api/codegraph, /api/codegraph/stats
+// ---------------------------------------------------------------------------
+
+fn seed_codegraph(store: &Store) {
+    use poneglyph_core::model::{CgEdge, CgEdgeKind, CgFile, CgNode, CgNodeKind};
+    store.cg_upsert_file(&CgFile { path: "a.rs".into(), language: "rust".into(), content_hash: "h1".into() }).unwrap();
+    let caller = CgNode { id: "a.rs#1:caller".into(), file_path: "a.rs".into(), kind: CgNodeKind::Function, name: "caller".into(), start_line: 1, end_line: 1 };
+    let callee = CgNode { id: "a.rs#2:callee".into(), file_path: "a.rs".into(), kind: CgNodeKind::Function, name: "callee".into(), start_line: 2, end_line: 2 };
+    store.cg_insert_node(&caller).unwrap();
+    store.cg_insert_node(&callee).unwrap();
+    store.cg_insert_edge(&CgEdge { src_id: caller.id, dst_id: callee.id, kind: CgEdgeKind::Calls }).unwrap();
+}
+
+#[tokio::test]
+async fn codegraph_endpoint_returns_full_graph_with_no_focus() {
+    let (state, store) = open_state();
+    seed_codegraph(&store.lock().unwrap());
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/codegraph")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(body["edges"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn codegraph_endpoint_limit_caps_node_count() {
+    let (state, store) = open_state();
+    seed_codegraph(&store.lock().unwrap());
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/codegraph?limit=1")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["nodes"].as_array().unwrap().len(), 1);
+    // No edges since the capped single node can't have both endpoints in view.
+    assert_eq!(body["edges"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn codegraph_endpoint_focus_returns_blast_radius_subset() {
+    let (state, store) = open_state();
+    seed_codegraph(&store.lock().unwrap());
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/codegraph?focus=callee&depth=2")).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = body["nodes"].as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"callee"));
+    assert!(names.contains(&"caller"));
+}
+
+#[tokio::test]
+async fn codegraph_stats_reports_counts() {
+    let (state, store) = open_state();
+    seed_codegraph(&store.lock().unwrap());
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/codegraph/stats")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["files"], 1);
+    assert_eq!(body["nodes"], 2);
+    assert_eq!(body["edges"], 1);
+}
+
+// ---------------------------------------------------------------------------
+// /api/token-savings
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn token_savings_estimates_compression_on_stored_content() {
+    let (state, store) = open_state();
+    {
+        let store = store.lock().unwrap();
+        store
+            .create_memory(
+                "The function and the configuration would, however, change because of this.",
+                MemoryType::Fact,
+                0.5,
+                Source::Cli,
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/token-savings")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["sampled_memories"], 1);
+    assert!(body["original_bytes"].as_u64().unwrap() > body["compressed_bytes"].as_u64().unwrap());
+    assert!(body["savings_pct"].as_f64().unwrap() > 0.0);
+    assert_eq!(body["compression_enabled"], false);
+}
+
+// ---------------------------------------------------------------------------
+// /api/agents-status
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn agents_status_reports_config_flags_for_every_agent() {
+    let (state, _store) = open_state();
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/agents-status")).await;
+    assert_eq!(status, StatusCode::OK);
+    for agent in ["claude_code", "cursor", "gemini_cli", "opencode", "codex", "copilot_cli"] {
+        assert_eq!(body[agent]["enabled"], true, "{agent} should be enabled by default config");
+        assert!(body[agent]["detected"].is_boolean());
+    }
 }

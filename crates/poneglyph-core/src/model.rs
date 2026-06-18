@@ -125,6 +125,9 @@ pub enum JobType {
     ExtractEntities,
     ExtractRelations,
     ScoreImportance,
+    /// Token-reduced retrievable rewrite for context injection only — never a substitute
+    /// for `memories.content` in recall/FTS/vector search.
+    ExtractCompress,
 }
 
 impl std::fmt::Display for JobType {
@@ -135,6 +138,7 @@ impl std::fmt::Display for JobType {
             Self::ExtractEntities => "extract_entities",
             Self::ExtractRelations => "extract_relations",
             Self::ScoreImportance => "score_importance",
+            Self::ExtractCompress => "extract_compress",
         };
         write!(f, "{s}")
     }
@@ -149,6 +153,7 @@ impl std::str::FromStr for JobType {
             "extract_entities" => Ok(Self::ExtractEntities),
             "extract_relations" => Ok(Self::ExtractRelations),
             "score_importance" => Ok(Self::ScoreImportance),
+            "extract_compress" => Ok(Self::ExtractCompress),
             _ => Err(anyhow::anyhow!("unknown job_type: {s}")),
         }
     }
@@ -300,6 +305,110 @@ pub struct Job {
 }
 
 // ---------------------------------------------------------------------------
+// Code knowledge graph (Tree-sitter) — distinct from the memory-linkage
+// `Edge`/`EdgeType` above. See core::codegraph.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CgNodeKind {
+    Function,
+    Method,
+    /// Class / struct / interface — call sites care about callability, not
+    /// the type-declaration shape, so these share one kind.
+    Type,
+    Import,
+    Test,
+}
+
+impl std::fmt::Display for CgNodeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Function => "function",
+            Self::Method => "method",
+            Self::Type => "type",
+            Self::Import => "import",
+            Self::Test => "test",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl std::str::FromStr for CgNodeKind {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "function" => Ok(Self::Function),
+            "method" => Ok(Self::Method),
+            "type" => Ok(Self::Type),
+            "import" => Ok(Self::Import),
+            "test" => Ok(Self::Test),
+            _ => Err(anyhow::anyhow!("unknown cg_node kind: {s}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CgEdgeKind {
+    Calls,
+    Imports,
+    Tests,
+}
+
+impl std::fmt::Display for CgEdgeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Calls => "calls",
+            Self::Imports => "imports",
+            Self::Tests => "tests",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl std::str::FromStr for CgEdgeKind {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "calls" => Ok(Self::Calls),
+            "imports" => Ok(Self::Imports),
+            "tests" => Ok(Self::Tests),
+            _ => Err(anyhow::anyhow!("unknown cg_edge kind: {s}")),
+        }
+    }
+}
+
+/// A parsed code symbol (function, method, type, import, or test).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CgNode {
+    /// Deterministic: `{file}#{start_line}:{name}` — stable across rebuilds
+    /// of an unchanged file so re-parsing doesn't churn edge rows.
+    pub id: String,
+    pub file_path: String,
+    pub kind: CgNodeKind,
+    pub name: String,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+/// A directed edge between two code symbols.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CgEdge {
+    pub src_id: String,
+    pub dst_id: String,
+    pub kind: CgEdgeKind,
+}
+
+/// A tracked source file (for incremental re-parsing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CgFile {
+    pub path: String,
+    pub language: String,
+    pub content_hash: String,
+}
+
+// ---------------------------------------------------------------------------
 // Input helpers (for create operations)
 // ---------------------------------------------------------------------------
 
@@ -325,4 +434,25 @@ fn default_memory_type() -> MemoryType {
 
 fn default_importance() -> f64 {
     0.5
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn job_type_round_trips_through_string() {
+        for jt in [
+            JobType::ComputeEdges,
+            JobType::Summarize,
+            JobType::ExtractEntities,
+            JobType::ExtractRelations,
+            JobType::ScoreImportance,
+            JobType::ExtractCompress,
+        ] {
+            let s = jt.to_string();
+            assert_eq!(JobType::from_str(&s).unwrap(), jt);
+        }
+    }
 }

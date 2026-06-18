@@ -1,4 +1,7 @@
 import type {
+  AgentsStatus,
+  CodegraphResponse,
+  CodegraphStats,
   GraphResponse,
   ListResponse,
   MemoryDetail,
@@ -6,6 +9,7 @@ import type {
   SearchHit,
   Stats,
   TimelineResponse,
+  TokenSavings,
 } from './types.ts'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -74,6 +78,15 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     }),
+
+  codegraph: (params: { focus?: string; depth?: number; limit?: number }) =>
+    request<CodegraphResponse>(`/api/codegraph${qs(params)}`),
+
+  codegraphStats: () => request<CodegraphStats>('/api/codegraph/stats'),
+
+  tokenSavings: () => request<TokenSavings>('/api/token-savings'),
+
+  agentsStatus: () => request<AgentsStatus>('/api/agents-status'),
 }
 
 export function formatDate(iso: string | null): string {

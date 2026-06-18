@@ -15,10 +15,11 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use poneglyph_core::codegraph;
 use poneglyph_core::config::Config;
 use poneglyph_core::embed::Embedder;
 use poneglyph_core::enrich::{self, EnrichHandle};
-use poneglyph_core::model::{Memory, MemoryType, Source};
+use poneglyph_core::model::{CgNode, Memory, MemoryType, Source};
 use poneglyph_core::retrieve::RecallFilters;
 use poneglyph_core::store::Store;
 
@@ -90,6 +91,21 @@ pub struct ListMemoriesRequest {
     pub offset: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CodegraphQueryRequest {
+    /// `callers_of:<name>`, `callees_of:<name>`, `imports_of:<name>`,
+    /// `tests_for:<name>`, or a bare keyword.
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CodegraphBlastRadiusRequest {
+    /// File path (relative to the graph root) or symbol name.
+    pub target: String,
+    /// Max traversal depth (defaults to `[graph].blast_radius_depth`).
+    pub depth: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // Responses
 // ---------------------------------------------------------------------------
@@ -151,6 +167,48 @@ pub struct ProjectContextResult {
 pub struct ListMemoriesResponse {
     pub results: Vec<MemoryView>,
     pub total: i64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodegraphNodeView {
+    pub id: String,
+    /// function | method | type | import | test.
+    pub kind: String,
+    pub name: String,
+    pub file_path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+impl From<&CgNode> for CodegraphNodeView {
+    fn from(n: &CgNode) -> Self {
+        Self {
+            id: n.id.clone(),
+            kind: n.kind.to_string(),
+            name: n.name.clone(),
+            file_path: n.file_path.clone(),
+            start_line: n.start_line,
+            end_line: n.end_line,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodegraphQueryResponse {
+    pub results: Vec<CodegraphNodeView>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodegraphDependentView {
+    pub node: CodegraphNodeView,
+    pub depth: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodegraphBlastRadiusResponse {
+    pub root: Vec<CodegraphNodeView>,
+    pub dependents: Vec<CodegraphDependentView>,
+    pub tests: Vec<CodegraphNodeView>,
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +322,12 @@ impl PoneglyphMcp {
                 enrich::enqueue_llm_jobs(&store, &mem.id).map_err(internal)?;
             }
 
+            // Compression is orthogonal to llm_assist/enrichment.
+            if self.config.memory.compression_enabled {
+                enrich::enqueue_compression(&store, &mem.id, self.config.memory.compression_mode)
+                    .map_err(internal)?;
+            }
+
             mem.id
         };
 
@@ -348,6 +412,9 @@ impl PoneglyphMcp {
                 }
                 // Content changed ⇒ similarity edges may have changed.
                 enrich::enqueue_compute_edges(&store, &req.id).map_err(internal)?;
+                // Drop any cached compression for the old content — stale
+                // otherwise, since nothing here regenerates it.
+                store.clear_compressed_content(&req.id).map_err(internal)?;
             }
             updated
         };
@@ -404,6 +471,36 @@ impl PoneglyphMcp {
             total,
         }))
     }
+
+    #[tool(description = "Query the code knowledge graph: callers_of:<name>, callees_of:<name>, imports_of:<name>, tests_for:<name>, or a bare keyword search. Requires `poneglyph graph init` to have been run.")]
+    pub async fn codegraph_query(
+        &self,
+        Parameters(req): Parameters<CodegraphQueryRequest>,
+    ) -> Result<Json<CodegraphQueryResponse>, ErrorData> {
+        let store = self.lock_store()?;
+        let query = codegraph::parse_query(&req.query);
+        let results = codegraph::run_query(&store, &query).map_err(internal)?;
+        Ok(Json(CodegraphQueryResponse { results: results.iter().map(CodegraphNodeView::from).collect() }))
+    }
+
+    #[tool(description = "Recursive caller/importer/test trace from a file or symbol in the code knowledge graph — what breaks if this changes. Requires `poneglyph graph init` to have been run.")]
+    pub async fn codegraph_blast_radius(
+        &self,
+        Parameters(req): Parameters<CodegraphBlastRadiusRequest>,
+    ) -> Result<Json<CodegraphBlastRadiusResponse>, ErrorData> {
+        let depth = req.depth.unwrap_or(self.config.graph.blast_radius_depth);
+        let store = self.lock_store()?;
+        let report = codegraph::blast_radius(&store, &req.target, depth).map_err(internal)?;
+        Ok(Json(CodegraphBlastRadiusResponse {
+            root: report.root.iter().map(CodegraphNodeView::from).collect(),
+            dependents: report
+                .dependents
+                .iter()
+                .map(|d| CodegraphDependentView { node: CodegraphNodeView::from(&d.node), depth: d.depth })
+                .collect(),
+            tests: report.tests.iter().map(CodegraphNodeView::from).collect(),
+        }))
+    }
 }
 
 #[tool_handler]
@@ -412,9 +509,12 @@ impl ServerHandler for PoneglyphMcp {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
-            "poneglyph is a local persistent memory engine. Use `remember` to store \
-             durable facts/decisions/preferences, `recall` to search past memories, \
-             and `get_project_context` at session start to load project memory."
+            "poneglyph is a local persistent memory engine with a code knowledge graph. \
+             Use `remember` to store durable facts/decisions/preferences, `recall` to search \
+             past memories, and `get_project_context` at session start to load project memory. \
+             Use `codegraph_query` (callers_of/callees_of/imports_of/tests_for/keyword) and \
+             `codegraph_blast_radius` to answer code-impact questions — run `poneglyph graph init` \
+             on the project first."
                 .into(),
         );
         info

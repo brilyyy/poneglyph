@@ -1,0 +1,23 @@
+{
+  "name": "poneglyph",
+  "version": "0.1.0",
+  "description": "Local-first AI memory engine + code intelligence — single binary, any LLM.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brilyyy/poneglyph.git"
+  },
+  "bin": {
+    "poneglyph": "bin/poneglyph.js"
+  },
+  "files": [
+    "bin/poneglyph.js",
+    "scripts/npm-postinstall.js"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/npm-postinstall.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

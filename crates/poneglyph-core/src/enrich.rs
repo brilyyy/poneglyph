@@ -18,7 +18,7 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::config::{EnrichmentConfig, GraphConfig, LlmConfig};
+use crate::config::{CompressionMode, EnrichmentConfig, LlmConfig, MemoryEdgesConfig};
 use crate::graph;
 use crate::model::{Job, JobStatus, JobType};
 use crate::store::Store;
@@ -37,9 +37,14 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 /// Everything the background worker needs to know.
 #[derive(Clone)]
 pub struct WorkerConfig {
-    pub graph: GraphConfig,
+    pub edges: MemoryEdgesConfig,
     pub llm: LlmConfig,
     pub enrichment: EnrichmentConfig,
+    /// Compression is orthogonal to `enrichment.enabled` — semantic mode
+    /// still needs an LLM client, so the worker must know to construct one
+    /// even when enrichment itself is off.
+    pub compression_enabled: bool,
+    pub compression_mode: CompressionMode,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +68,30 @@ pub fn enqueue_llm_jobs(store: &Store, memory_id: &str) -> Result<()> {
         store.create_job(jt, memory_id)?;
     }
     Ok(())
+}
+
+/// Compress a memory for context injection per `[memory].compression_mode`
+/// (caller gates on `compression_enabled`). Caveman mode is byte-exact and
+/// cheap enough to run inline, synchronously, right here — no job needed.
+/// Semantic mode needs the async LLM client, so it goes through the job
+/// queue like the other LLM jobs; the worker falls back to caveman if no
+/// LLM ends up configured (see `llm::compress_caveman_fallback`).
+pub fn enqueue_compression(store: &Store, memory_id: &str, mode: CompressionMode) -> Result<()> {
+    match mode {
+        CompressionMode::Caveman => {
+            if let Some(m) = store.get_memory(memory_id)?
+                && m.content.len() >= crate::llm::SUMMARIZE_MIN_CHARS
+            {
+                let compressed = crate::compress::compress(&m.content);
+                store.set_compressed_content(memory_id, &compressed, "caveman")?;
+            }
+            Ok(())
+        }
+        CompressionMode::Semantic => {
+            store.create_job(JobType::ExtractCompress, memory_id)?;
+            Ok(())
+        }
+    }
 }
 
 fn backoff(attempts: i64) -> chrono::Duration {
@@ -94,7 +123,7 @@ fn fail_or_retry(store: &Store, job: &Job, err: &anyhow::Error) -> Result<()> {
 /// Drain due `compute_edges` jobs once; LLM jobs are left pending for the
 /// resident `serve` worker (the jobs table is the source of truth).
 /// Returns jobs processed.
-pub fn process_pending_jobs(store: &Store, graph_cfg: &GraphConfig) -> Result<usize> {
+pub fn process_pending_jobs(store: &Store, edges_cfg: &MemoryEdgesConfig) -> Result<usize> {
     let now = Utc::now();
     let jobs = store.get_pending_jobs(DRAIN_BATCH)?;
     let mut processed = 0;
@@ -104,7 +133,7 @@ pub fn process_pending_jobs(store: &Store, graph_cfg: &GraphConfig) -> Result<us
             continue;
         }
         store.mark_job_running(&job.id)?;
-        match graph::build_edges_for_memory(store, graph_cfg, &job.memory_id) {
+        match graph::build_edges_for_memory(store, edges_cfg, &job.memory_id) {
             Ok(n) => {
                 debug!(memory_id = %job.memory_id, edges = n, "computed edges");
                 store.update_job_status(&job.id, JobStatus::Done, None)?;
@@ -144,10 +173,18 @@ pub async fn process_jobs_async(
 
         let outcome: Result<()> = match job.job_type {
             JobType::ComputeEdges => {
-                graph::build_edges_for_memory(&*store, &cfg.graph, &job.memory_id).map(|n| {
+                graph::build_edges_for_memory(&*store, &cfg.edges, &job.memory_id).map(|n| {
                     debug!(memory_id = %job.memory_id, edges = n, "computed edges");
                 })
             }
+            // Compression degrades gracefully instead of failing: no LLM
+            // configured just means the caveman fallback runs in its place.
+            JobType::ExtractCompress => match llm {
+                Some(client) => {
+                    crate::llm::run_job(&mut *store, client, &job.job_type, &job.memory_id).await
+                }
+                None => crate::llm::compress_caveman_fallback(&mut *store, &job.memory_id),
+            },
             ref llm_type => match llm {
                 Some(client) => crate::llm::run_job(&mut *store, client, llm_type, &job.memory_id).await,
                 // Stale rows from a previously-enabled config: fail once,
@@ -212,14 +249,18 @@ pub fn spawn_worker(
             }
         };
 
-        let llm = if cfg.enrichment.enabled {
+        // Compression is orthogonal to enrichment: semantic mode needs an
+        // LLM client even when enrichment.enabled is false.
+        let needs_llm = cfg.enrichment.enabled
+            || (cfg.compression_enabled && cfg.compression_mode == CompressionMode::Semantic);
+        let llm = if needs_llm {
             match crate::llm::LlmClient::from_config(&cfg.llm) {
                 Some(c) => {
-                    info!(model = %cfg.llm.model.as_deref().unwrap_or("?"), "LLM enrichment enabled");
+                    info!(model = %cfg.llm.model.as_deref().unwrap_or("?"), "LLM client constructed");
                     Some(c)
                 }
                 None => {
-                    warn!("enrichment.enabled but llm config incomplete (need enabled+endpoint+model); LLM jobs will fail");
+                    warn!("enrichment/compression enabled but llm config incomplete (need enabled+endpoint+model); LLM jobs will fail, semantic compression will fall back to caveman");
                     None
                 }
             }
@@ -260,16 +301,18 @@ mod tests {
 
     fn worker_cfg() -> WorkerConfig {
         WorkerConfig {
-            graph: GraphConfig::default(),
+            edges: MemoryEdgesConfig::default(),
             llm: LlmConfig::default(),
             enrichment: EnrichmentConfig::default(),
+            compression_enabled: false,
+            compression_mode: CompressionMode::default(),
         }
     }
 
     #[test]
     fn enqueue_and_drain_compute_edges() {
         let store = Store::open_in_memory().unwrap();
-        let cfg = GraphConfig::default();
+        let cfg = MemoryEdgesConfig::default();
         let p = store.upsert_project("/p", "p", None).unwrap();
 
         let m1 = store
@@ -300,7 +343,7 @@ mod tests {
     #[test]
     fn sync_drain_skips_llm_jobs() {
         let store = Store::open_in_memory().unwrap();
-        let cfg = GraphConfig::default();
+        let cfg = MemoryEdgesConfig::default();
         let m = store
             .create_memory("x", MemoryType::Fact, 0.5, Source::Cli, None, None)
             .unwrap();

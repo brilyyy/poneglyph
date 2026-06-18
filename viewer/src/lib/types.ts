@@ -120,3 +120,63 @@ export interface TimelineResponse {
   sessions: TimelineSession[]
   total: number
 }
+
+// ---------------------------------------------------------------------------
+// Code knowledge graph (Tree-sitter) — distinct from the memory Graph above.
+// Mirrors poneglyph-core/src/model.rs CgNode/CgEdge.
+// ---------------------------------------------------------------------------
+
+export type CgNodeKind = 'function' | 'method' | 'type' | 'import' | 'test'
+export type CgEdgeKind = 'calls' | 'imports' | 'tests'
+
+export interface CgNode {
+  id: string
+  file_path: string
+  kind: CgNodeKind
+  name: string
+  start_line: number
+  end_line: number
+}
+
+export interface CgEdge {
+  src_id: string
+  dst_id: string
+  kind: CgEdgeKind
+}
+
+export interface CodegraphResponse {
+  nodes: CgNode[]
+  edges: CgEdge[]
+}
+
+export interface CodegraphStats {
+  files: number
+  nodes: number
+  edges: number
+}
+
+export const CG_NODE_COLORS: Record<CgNodeKind, string> = {
+  function: '#34d399', // emerald-400
+  method: '#60a5fa', // blue-400
+  type: '#fbbf24', // amber-400
+  import: '#94a3b8', // slate-400
+  test: '#f472b6', // pink-400
+}
+
+export interface TokenSavings {
+  sampled_memories: number
+  original_bytes: number
+  compressed_bytes: number
+  savings_pct: number
+  compression_enabled: boolean
+}
+
+export interface AgentStatusEntry {
+  enabled: boolean
+  detected: boolean
+}
+
+export type AgentsStatus = Record<
+  'claude_code' | 'cursor' | 'gemini_cli' | 'opencode' | 'codex' | 'copilot_cli',
+  AgentStatusEntry
+>

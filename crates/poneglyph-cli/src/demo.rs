@@ -81,7 +81,7 @@ pub struct SeedOutcome {
 pub fn seed(
     store: &Store,
     count: usize,
-    graph_cfg: &poneglyph_core::config::GraphConfig,
+    graph_cfg: &poneglyph_core::config::MemoryEdgesConfig,
     mut embed: Option<&mut dyn FnMut(&str) -> Result<Vec<f32>>>,
 ) -> Result<SeedOutcome> {
     let project_ids: Vec<String> = PROJECTS
@@ -158,12 +158,12 @@ pub fn seed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use poneglyph_core::config::GraphConfig;
+    use poneglyph_core::config::MemoryEdgesConfig;
 
     #[test]
     fn seed_populates_store_offline() {
         let store = Store::open_in_memory().unwrap();
-        let out = seed(&store, 20, &GraphConfig::default(), None).unwrap();
+        let out = seed(&store, 20, &MemoryEdgesConfig::default(), None).unwrap();
         assert_eq!(out.memories, 20);
         assert_eq!(out.projects, 3);
         assert!(out.edges > 0, "temporal/tag edges should form without embeddings");
@@ -173,14 +173,14 @@ mod tests {
     #[test]
     fn seed_cycles_past_template_count() {
         let store = Store::open_in_memory().unwrap();
-        let out = seed(&store, SEEDS.len() + 5, &GraphConfig::default(), None).unwrap();
+        let out = seed(&store, SEEDS.len() + 5, &MemoryEdgesConfig::default(), None).unwrap();
         assert_eq!(out.memories, SEEDS.len() + 5);
     }
 
     #[test]
     fn seed_rows_carry_session_id() {
         let store = Store::open_in_memory().unwrap();
-        seed(&store, 6, &GraphConfig::default(), None).unwrap();
+        seed(&store, 6, &MemoryEdgesConfig::default(), None).unwrap();
         let (mems, _) = store.list_memories(None, None, 10, 0).unwrap();
         for mem in &mems {
             let meta = mem.metadata.as_ref().unwrap();

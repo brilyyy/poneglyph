@@ -5,10 +5,27 @@
 - **Rust 1.75+** (edition 2024) — install via [rustup](https://rustup.rs)
 - **jq** and **curl** — required for Claude Code hooks (macOS: `brew install jq`)
 
+## Install via npm
+
+```sh
+npm install -g poneglyph
+```
+
+Downloads a prebuilt binary for your platform (macOS arm64/x86_64, Linux
+x86_64, Windows) from GitHub Releases — no Rust toolchain required. Falls
+back to printing a `cargo install` hint if no prebuilt binary matches your
+platform or the release is missing.
+
+## Install via cargo
+
+```sh
+cargo install poneglyph
+```
+
 ## Build from source
 
 ```sh
-git clone https://github.com/your-org/poneglyph.git
+git clone https://github.com/brilyyy/poneglyph.git
 cd poneglyph
 cargo build --release
 ```
@@ -71,7 +88,19 @@ enabled = false
 
 [enrichment]
 enabled = false
+
+[memory]
+compression_enabled = false
+compression_mode = "caveman"  # "caveman" | "semantic"
+
+[graph]
+enabled = true
+exclude_patterns = ["**/target/**", "**/node_modules/**", "**/.git/**", "**/*.test.ts", "**/*_test.rs"]
+blast_radius_depth = 5
 ```
+
+See [COMPRESSION.md](COMPRESSION.md) for `[memory]` compression detail and
+[CODEGRAPH.md](CODEGRAPH.md) for `[graph]` and `.poneglyphignore`.
 
 Environment variables override config (prefix `PONEGLYPH_`):
 - `PONEGLYPH_PORT` — HTTP port
@@ -90,8 +119,19 @@ Environment variables override config (prefix `PONEGLYPH_`):
 | `poneglyph export --format json` | Export all memories |
 | `poneglyph status` | Show db path, counts, model info |
 | `poneglyph demo` | Seed sample data |
+| `poneglyph graph init [path]` | Full code-graph build (Tree-sitter parse) under `path` (default `.`) |
+| `poneglyph graph update [path]` | Incremental code-graph rebuild (changed files only) |
+| `poneglyph graph watch [path]` | Watch and incrementally rebuild on change |
+| `poneglyph graph query "<q>"` | `callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/keyword query |
+| `poneglyph graph blast-radius <target> [--depth N]` | Recursive caller/importer/test trace |
+| `poneglyph graph export --format json\|dot\|graphml [--out path]` | Export the code graph |
+
+See [CODEGRAPH.md](CODEGRAPH.md) for full detail on the code graph,
+`.poneglyphignore`, and the matching MCP tools.
 
 ## Next steps
 
 - [INTEGRATIONS.md](INTEGRATIONS.md) — set up Claude Code hooks, Claude Desktop MCP, or OpenCode plugin
+- [CODEGRAPH.md](CODEGRAPH.md) — code knowledge graph, `.poneglyphignore`
+- [COMPRESSION.md](COMPRESSION.md) — semantic compression pipeline
 - [MIGRATION.md](MIGRATION.md) — schema migration guide

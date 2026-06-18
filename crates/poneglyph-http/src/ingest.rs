@@ -66,7 +66,7 @@ pub struct IngestEvent {
 
 pub async fn ingest(
     State(state): State<AppState>,
-    ApiJson(ev): ApiJson<IngestEvent>,
+    ApiJson(mut ev): ApiJson<IngestEvent>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     if ev.content.trim().is_empty() {
         return Err(ApiError::bad_request("content must be non-empty"));
@@ -76,6 +76,16 @@ pub async fn ingest(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!("content exceeds {MAX_CONTENT_BYTES} bytes"),
         ));
+    }
+
+    // Never index content naming an excluded path (.env, *.pem, secrets/**).
+    let exclude_matcher = poneglyph_core::privacy::build_exclude_matcher(&state.config.privacy.exclude_paths);
+    if poneglyph_core::privacy::content_references_excluded_path(&ev.content, &exclude_matcher) {
+        return Ok((StatusCode::ACCEPTED, Json(json!({ "skipped": "excluded_path" }))));
+    }
+    ev.content = poneglyph_core::privacy::redact_content(&ev.content, &state.config.privacy);
+    if ev.content.trim().is_empty() {
+        return Ok((StatusCode::ACCEPTED, Json(json!({ "skipped": "redacted_empty" }))));
     }
 
     // Tags double as the AC marker: memory is "tagged with tool name and project".
@@ -130,6 +140,11 @@ pub async fn ingest(
         // Passive capture is high-volume; only summarize is worth LLM time.
         if state.config.enrichment.enabled && state.config.llm.enabled {
             store.create_job(poneglyph_core::model::JobType::Summarize, &mem.id)?;
+        }
+
+        // Compression is orthogonal to enrichment.
+        if state.config.memory.compression_enabled {
+            enrich::enqueue_compression(&store, &mem.id, state.config.memory.compression_mode)?;
         }
 
         mem.id

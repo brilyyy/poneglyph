@@ -1,4 +1,5 @@
 mod demo;
+mod detect;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -76,6 +77,47 @@ enum Command {
     Decay,
     /// Show status
     Status,
+    /// Code knowledge graph (Tree-sitter) — distinct from the memory graph
+    Graph {
+        #[command(subcommand)]
+        action: GraphCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphCommand {
+    /// Full build: parse every matching file under `path`
+    Init {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Incremental build: only reparse files whose content changed
+    Update {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Watch `path` and incrementally rebuild on change (debounced)
+    Watch {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Structured (callers_of:/callees_of:/imports_of:/tests_for:) or keyword query
+    Query {
+        q: String,
+    },
+    /// Recursive caller/importer/test trace from a file or symbol
+    BlastRadius {
+        target: String,
+        #[arg(long)]
+        depth: Option<usize>,
+    },
+    /// Export the graph as json, dot, or graphml
+    Export {
+        #[arg(long, default_value = "json")]
+        format: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn load_config(cli_config: &Option<PathBuf>) -> Result<Config> {
@@ -109,19 +151,22 @@ async fn main() -> Result<()> {
         Command::Consolidate { project } => cmd_consolidate(&config, project.as_deref()).await,
         Command::Decay => cmd_decay(&config),
         Command::Status => cmd_status(&config),
+        Command::Graph { action } => cmd_graph(&config, action),
     }
 }
 
 fn cmd_init(config: &Config) -> Result<()> {
     config.ensure_dirs().context("failed to create directories")?;
 
-    // Create default config if it doesn't exist
+    // Create default config if it doesn't exist: every key present but
+    // commented, except values resolved by local-provider detection.
     let config_path = Config::default_config_path();
     if !config_path.exists() {
         if let Some(dir) = config_path.parent() {
             std::fs::create_dir_all(dir).context("failed to create config directory")?;
         }
-        let toml = toml::to_string_pretty(config).unwrap_or_default();
+        let detected = detect::detect_local_llm();
+        let toml = detect::render_config_template(&detected);
         std::fs::write(&config_path, toml).context("failed to write config")?;
         println!("Config created: {}", config_path.display());
     } else {
@@ -131,6 +176,14 @@ fn cmd_init(config: &Config) -> Result<()> {
     // Initialize DB
     Store::open(&config.db_path).context("failed to initialize database")?;
     println!("Database initialized: {}", config.db_path.display());
+
+    // Auto-detect and wire up installed coding agents (MCP server + hooks).
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "poneglyph".to_string());
+    let hooks_dir = Config::config_dir().join("hooks");
+    println!("\nAgent integration:");
+    for outcome in detect::run_agent_setup(&config.agents, &hooks_dir, &exe)? {
+        println!("  {:<14} {}", outcome.agent, outcome.status.as_str());
+    }
 
     Ok(())
 }
@@ -161,9 +214,11 @@ async fn cmd_serve(config: &Config) -> Result<()> {
     let (enrich, worker) = poneglyph_core::enrich::spawn_worker(
         config.db_path.clone(),
         poneglyph_core::enrich::WorkerConfig {
-            graph: config.graph.clone(),
+            edges: config.memory.edges.clone(),
             llm: config.llm.clone(),
             enrichment: config.enrichment.clone(),
+            compression_enabled: config.memory.compression_enabled,
+            compression_mode: config.memory.compression_mode,
         },
     );
 
@@ -172,9 +227,9 @@ async fn cmd_serve(config: &Config) -> Result<()> {
     // HTTP server (same DB) and runs MCP-only here.
     let listener = match poneglyph_http::bind(config).await {
         Ok(l) => Some(l),
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && config.server.mcp => {
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && config.dashboard.mcp => {
             tracing::warn!(
-                port = config.server.http_port,
+                port = config.dashboard.port,
                 "HTTP port busy — another poneglyph instance is serving HTTP; continuing MCP-only"
             );
             None
@@ -196,7 +251,7 @@ async fn cmd_serve(config: &Config) -> Result<()> {
     };
 
     // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
-    let result = if config.server.mcp {
+    let result = if config.dashboard.mcp {
         let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store, embedder, shared_config)
             .with_enrich(enrich);
         tokio::select! {
@@ -251,7 +306,7 @@ async fn cmd_demo(config: &Config, count: usize, db: Option<PathBuf>, force: boo
             }
             None => None,
         };
-        tokio::task::block_in_place(|| demo::seed(&store, count, &config.graph, embed))?
+        tokio::task::block_in_place(|| demo::seed(&store, count, &config.memory.edges, embed))?
     };
 
     println!(
@@ -278,6 +333,12 @@ async fn cmd_remember(
     let store = Store::open(&config.db_path)?;
     let embedder = try_embedder(config).await;
 
+    let exclude_matcher = poneglyph_core::privacy::build_exclude_matcher(&config.privacy.exclude_paths);
+    if poneglyph_core::privacy::content_references_excluded_path(content, &exclude_matcher) {
+        anyhow::bail!("refusing to store: content references an excluded path (see [privacy].exclude_paths)");
+    }
+    let content = poneglyph_core::privacy::redact_content(content, &config.privacy);
+
     let mem_type: MemoryType = memory_type.parse().unwrap_or(MemoryType::Semantic);
 
     // Resolve project (path → git-remote identity fallback).
@@ -293,7 +354,7 @@ async fn cmd_remember(
     };
 
     let mem = store.create_memory(
-        content,
+        &content,
         mem_type,
         importance,
         Source::Cli,
@@ -302,16 +363,22 @@ async fn cmd_remember(
     )?;
 
     // Index FTS + vector
-    store.index_fts(&mem.id, content)?;
+    store.index_fts(&mem.id, &content)?;
     if let Some(embedder) = &embedder {
-        let vec = embedder.embed_text(content).await?;
+        let vec = embedder.embed_text(&content).await?;
         store.index_embedding(&mem.id, &vec)?;
     }
 
     // One-shot process: enqueue the edge job, then drain inline so edges
     // exist without a running server (no-LLM builders are cheap).
     poneglyph_core::enrich::enqueue_compute_edges(&store, &mem.id)?;
-    poneglyph_core::enrich::process_pending_jobs(&store, &config.graph)?;
+    poneglyph_core::enrich::process_pending_jobs(&store, &config.memory.edges)?;
+
+    // Caveman compression runs inline above; semantic compression enqueues a
+    // job for whichever resident `serve` worker drains it next.
+    if config.memory.compression_enabled {
+        poneglyph_core::enrich::enqueue_compression(&store, &mem.id, config.memory.compression_mode)?;
+    }
 
     println!("{}", mem.id);
     Ok(())
@@ -480,6 +547,106 @@ fn cmd_status(config: &Config) -> Result<()> {
         println!("Note: data lives at a legacy (pre-XDG) location.");
         println!("Move it with poneglyph stopped, e.g.:");
         println!("  mv ~/Library/'Application Support'/poneglyph/poneglyph.db ~/.local/share/poneglyph/");
+    }
+
+    Ok(())
+}
+
+fn cmd_graph(config: &Config, action: GraphCommand) -> Result<()> {
+    use poneglyph_core::codegraph;
+
+    config.ensure_dirs()?;
+    let store = Store::open(&config.db_path)?;
+
+    match action {
+        GraphCommand::Init { path } => {
+            let report = codegraph::build(&store, &path, &config.graph, true)?;
+            print_build_report(&report);
+        }
+        GraphCommand::Update { path } => {
+            let report = codegraph::build(&store, &path, &config.graph, false)?;
+            print_build_report(&report);
+        }
+        GraphCommand::Watch { path } => cmd_graph_watch(&store, &path, config)?,
+        GraphCommand::Query { q } => {
+            let query = codegraph::parse_query(&q);
+            let results = codegraph::run_query(&store, &query)?;
+            if results.is_empty() {
+                println!("No matches.");
+            }
+            for n in &results {
+                println!("[{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
+            }
+        }
+        GraphCommand::BlastRadius { target, depth } => {
+            let depth = depth.unwrap_or(config.graph.blast_radius_depth);
+            let report = codegraph::blast_radius(&store, &target, depth)?;
+            if report.root.is_empty() {
+                println!("No file or symbol matching '{target}' found in the graph.");
+                return Ok(());
+            }
+            println!("Root ({} symbol(s)):", report.root.len());
+            for n in &report.root {
+                println!("  [{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
+            }
+            println!("\nDependents ({}):", report.dependents.len());
+            for d in &report.dependents {
+                println!("  depth {} [{}] {} — {}:{}", d.depth, d.node.kind, d.node.name, d.node.file_path, d.node.start_line);
+            }
+            println!("\nTests ({}):", report.tests.len());
+            for t in &report.tests {
+                println!("  {} — {}:{}", t.name, t.file_path, t.start_line);
+            }
+        }
+        GraphCommand::Export { format, out } => {
+            let rendered = match format.as_str() {
+                "json" => codegraph::export_json(&store)?,
+                "dot" => codegraph::export_dot(&store)?,
+                "graphml" => codegraph::export_graphml(&store)?,
+                other => anyhow::bail!("unknown export format '{other}' (use json, dot, or graphml)"),
+            };
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
+                    println!("Exported: {}", path.display());
+                }
+                None => println!("{rendered}"),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_build_report(report: &poneglyph_core::codegraph::BuildReport) {
+    println!(
+        "Parsed {} file(s), {} unchanged, {} removed. {} node(s), {} edge(s).",
+        report.files_parsed, report.files_unchanged, report.files_removed, report.nodes, report.edges
+    );
+}
+
+/// Blocks the calling thread, rebuilding incrementally after each debounced
+/// burst of filesystem events, until Ctrl-C.
+fn cmd_graph_watch(store: &Store, path: &std::path::Path, config: &Config) -> Result<()> {
+    use notify::{RecursiveMode, Watcher};
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(tx).context("failed to start file watcher")?;
+    watcher.watch(path, RecursiveMode::Recursive).context("failed to watch path")?;
+
+    println!("Watching {} (Ctrl-C to stop)...", path.display());
+    let debounce = std::time::Duration::from_millis(config.graph.watch_delay_ms);
+    loop {
+        // Block for the first event, then drain whatever else arrives within the debounce window.
+        if rx.recv().is_err() {
+            break;
+        }
+        while rx.recv_timeout(debounce).is_ok() {}
+
+        match poneglyph_core::codegraph::build(store, path, &config.graph, false) {
+            Ok(report) => print_build_report(&report),
+            Err(e) => tracing::warn!(error = %e, "graph update failed"),
+        }
     }
 
     Ok(())
