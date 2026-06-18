@@ -216,6 +216,10 @@ pub struct GraphQuery {
 pub struct GraphResponse {
     pub nodes: Vec<Memory>,
     pub edges: Vec<Edge>,
+    /// True memory/edge counts in the store, regardless of `limit` — lets
+    /// the viewer show "showing X of Y" instead of silently sampling.
+    pub total_nodes: i64,
+    pub total_edges: i64,
 }
 
 pub async fn graph(
@@ -223,7 +227,7 @@ pub async fn graph(
     Query(q): Query<GraphQuery>,
 ) -> ApiResult<GraphResponse> {
     let depth = q.depth.unwrap_or(1).clamp(1, 5);
-    let limit = q.limit.unwrap_or(500).clamp(1, 2000);
+    let limit = q.limit.unwrap_or(500).clamp(1, state.config.graph.max_render_nodes);
     let min_weight = q.min_weight.unwrap_or(DEFAULT_MIN_EDGE_WEIGHT).clamp(0.0, 1.0);
 
     let store = state.lock_store()?;
@@ -236,7 +240,8 @@ pub async fn graph(
         }
         None => store.graph_sample(limit, min_weight)?,
     };
-    Ok(Json(GraphResponse { nodes, edges }))
+    let stats = store.stats()?;
+    Ok(Json(GraphResponse { nodes, edges, total_nodes: stats.memory_count, total_edges: stats.edge_count }))
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +260,9 @@ pub struct CodegraphQuery {
 pub struct CodegraphResponse {
     pub nodes: Vec<CgNode>,
     pub edges: Vec<CgEdge>,
+    /// True node/edge counts in the code graph, regardless of `limit`.
+    pub total_nodes: i64,
+    pub total_edges: i64,
 }
 
 pub async fn codegraph_graph(
@@ -275,7 +283,7 @@ pub async fn codegraph_graph(
             (nodes, edges)
         }
         None => {
-            let limit = q.limit.unwrap_or(500).clamp(1, 2000);
+            let limit = q.limit.unwrap_or(500).clamp(1, state.config.graph.max_render_nodes);
             let nodes = store.cg_all_nodes(Some(limit))?;
             let id_vec: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
             let edges = store.cg_edges_for_nodes(&id_vec)?;
@@ -283,7 +291,8 @@ pub async fn codegraph_graph(
         }
     };
 
-    Ok(Json(CodegraphResponse { nodes, edges }))
+    let (_files, total_nodes, total_edges) = store.cg_stats()?;
+    Ok(Json(CodegraphResponse { nodes, edges, total_nodes, total_edges }))
 }
 
 pub async fn codegraph_stats(State(state): State<AppState>) -> ApiResult<Value> {
