@@ -19,17 +19,28 @@ agent has project context across sessions.
 ## Quick start
 
 ```sh
-# Build
-cargo build --release
+curl -fsSL https://raw.githubusercontent.com/brilyyy/poneglyph/main/scripts/install.sh | bash
+```
 
-# Initialize (creates db + config)
-./target/release/poneglyph init
+Installs a prebuilt binary for your platform (falling back to cloning and
+building from source if none is available), then runs `poneglyph init`.
 
+```sh
 # Start MCP + HTTP server
-./target/release/poneglyph serve
+poneglyph serve
 
 # Open viewer
 open http://127.0.0.1:3742
+```
+
+### Build from source
+
+```sh
+git clone https://github.com/brilyyy/poneglyph.git
+cd poneglyph
+cargo build --release
+./target/release/poneglyph init
+./target/release/poneglyph serve
 ```
 
 ## Demo
