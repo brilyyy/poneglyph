@@ -2,6 +2,31 @@
 
 Notable changes on `refactor/unified-v2`. Earlier history: `git log`.
 
+## Phase F — Multilingual embeddings, graph-first guidance, tree-sitter registry
+
+- Default embedding model swapped from `BAAI/bge-small-en-v1.5` (English-only)
+  to `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (50+
+  languages, still 384d — no schema change). `intfloat/multilingual-e5-base`
+  was tried first but its `XLMRobertaModel` architecture isn't supported by
+  `embed_anything`'s candle backend (Bert/Jina/ModernBert/Qwen3/Model2Vec
+  only); MiniLM is `BertModel`-based and loads cleanly. Cross-lingual recall
+  verified (French memory ↔ English query).
+- `Embedder::embed_query` / `embed_passage` replace the role-agnostic
+  `embed_text` at all store/recall call sites, with configurable
+  `[embedding].query_prefix` / `passage_prefix` (empty by default; e5-family
+  models need `"query: "` / `"passage: "`).
+- MCP server instructions, the injected `CLAUDE.md`/`AGENTS.md`/`.cursorrules`
+  rules block, and `SKILL.md` now push agents to try `codegraph_query`
+  (including a bare keyword search) before grep/glob for any "find/explore"
+  question, not just call/import/test impact analysis — a graph lookup
+  doesn't get slower as the repo grows the way a directory walk does.
+- `codegraph::parse` consolidated its three parallel per-language `match`
+  blocks (extension routing, grammar loading, node-kind tables) into one
+  `LANGS` table — adding a language is now one `tree-sitter-<lang>` dep plus
+  one table row instead of three match arms kept in sync by hand.
+- `poneglyph init` prints a small ASCII rendering of the logo (red, stays off
+  `serve`'s stdout, which is reserved for MCP JSON-RPC).
+
 ## Phase E — GPU graph viewer, parallel codegraph build, self-healing hooks
 
 - Cargo: `[profile.dev]`/`[profile.release]` (lto, codegen-units, opt-level).

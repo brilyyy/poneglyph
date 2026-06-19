@@ -246,9 +246,18 @@ impl PoneglyphMcp {
         self.store.lock().map_err(|_| internal("store mutex poisoned"))
     }
 
-    async fn embed_or_none(&self, text: &str) -> Result<Option<Vec<f32>>, ErrorData> {
+    /// Embed text being stored (memory content/edits).
+    async fn embed_passage_or_none(&self, text: &str) -> Result<Option<Vec<f32>>, ErrorData> {
         match &self.embedder {
-            Some(e) => e.embed_text(text).await.map(Some).map_err(internal),
+            Some(e) => e.embed_passage(text).await.map(Some).map_err(internal),
+            None => Ok(None),
+        }
+    }
+
+    /// Embed a search query.
+    async fn embed_query_or_none(&self, text: &str) -> Result<Option<Vec<f32>>, ErrorData> {
+        match &self.embedder {
+            Some(e) => e.embed_query(text).await.map(Some).map_err(internal),
             None => Ok(None),
         }
     }
@@ -276,7 +285,7 @@ impl PoneglyphMcp {
         let importance = req.importance.unwrap_or(0.5).clamp(0.0, 1.0);
 
         // Embed before taking the lock (no await under the mutex).
-        let embedding = self.embed_or_none(&req.content).await?;
+        let embedding = self.embed_passage_or_none(&req.content).await?;
 
         let id = {
             let store = self.lock_store()?;
@@ -344,7 +353,7 @@ impl PoneglyphMcp {
         Parameters(req): Parameters<RecallRequest>,
     ) -> Result<Json<RecallResponse>, ErrorData> {
         let limit = req.limit.unwrap_or(10).clamp(1, 100);
-        let query_vec = self.embed_or_none(&req.query).await?;
+        let query_vec = self.embed_query_or_none(&req.query).await?;
 
         let store = self.lock_store()?;
 
@@ -397,7 +406,7 @@ impl PoneglyphMcp {
         Parameters(req): Parameters<UpdateMemoryRequest>,
     ) -> Result<Json<UpdateMemoryResult>, ErrorData> {
         // Re-embed before locking.
-        let embedding = self.embed_or_none(&req.new_content).await?;
+        let embedding = self.embed_passage_or_none(&req.new_content).await?;
 
         let updated = {
             let store = self.lock_store()?;
@@ -512,9 +521,12 @@ impl ServerHandler for PoneglyphMcp {
             "poneglyph is a local persistent memory engine with a code knowledge graph. \
              Use `remember` to store durable facts/decisions/preferences, `recall` to search \
              past memories, and `get_project_context` at session start to load project memory. \
-             Use `codegraph_query` (callers_of/callees_of/imports_of/tests_for/keyword) and \
-             `codegraph_blast_radius` to answer code-impact questions — run `poneglyph graph init` \
-             on the project first."
+             For any \"find/explore/what relates to X\" question about code, call `codegraph_query` \
+             FIRST — even a bare keyword (no prefix) runs a graph-backed name search, faster and \
+             cheaper than scanning directories file-by-file on a large codebase. Use \
+             callers_of:/callees_of:/imports_of:/tests_for:/path:<a>..<b> for structural questions \
+             and `codegraph_blast_radius` for impact analysis. Only fall back to grep/glob when the \
+             graph returns nothing. Requires `poneglyph graph init` to have been run once."
                 .into(),
         );
         info

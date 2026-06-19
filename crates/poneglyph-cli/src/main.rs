@@ -12,6 +12,10 @@ use poneglyph_core::embed::Embedder;
 use poneglyph_core::model::{MemoryType, Source};
 use poneglyph_core::store::Store;
 
+/// Stone-tablet emblem, ASCII-rendered from viewer/public/logo.svg.
+/// Printed only on `init` — `serve`'s stdout is reserved for MCP JSON-RPC.
+const BANNER: &str = include_str!("banner.txt");
+
 #[derive(Parser)]
 #[command(name = "poneglyph", version, about = "Local AI memory engine")]
 struct Cli {
@@ -162,6 +166,8 @@ async fn main() -> Result<()> {
 }
 
 fn cmd_init(config: &Config, inject_rules: bool) -> Result<()> {
+    println!("\x1b[38;2;153;0;17m{BANNER}\x1b[0m");
+
     config.ensure_dirs().context("failed to create directories")?;
 
     // Create default config if it doesn't exist: every key present but
@@ -319,7 +325,7 @@ async fn cmd_demo(config: &Config, count: usize, db: Option<PathBuf>, force: boo
             Some(e) => {
                 let e = Arc::clone(e);
                 let rt = tokio::runtime::Handle::current();
-                embed_fn = move |text: &str| rt.block_on(e.embed_text(text));
+                embed_fn = move |text: &str| rt.block_on(e.embed_passage(text));
                 Some(&mut embed_fn)
             }
             None => None,
@@ -383,7 +389,7 @@ async fn cmd_remember(
     // Index FTS + vector
     store.index_fts(&mem.id, &content)?;
     if let Some(embedder) = &embedder {
-        let vec = embedder.embed_text(&content).await?;
+        let vec = embedder.embed_passage(&content).await?;
         store.index_embedding(&mem.id, &vec)?;
     }
 
@@ -408,7 +414,7 @@ async fn cmd_recall(config: &Config, query: &str, limit: usize) -> Result<()> {
     let embedder = try_embedder(config).await;
 
     let query_vec = match &embedder {
-        Some(e) => Some(e.embed_text(query).await?),
+        Some(e) => Some(e.embed_query(query).await?),
         None => None,
     };
 

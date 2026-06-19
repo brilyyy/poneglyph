@@ -23,17 +23,6 @@ pub struct ParsedFile {
     pub tests: Vec<(String, Option<String>)>,
 }
 
-pub fn language_for_extension(ext: &str) -> Option<&'static str> {
-    match ext {
-        "rs" => Some("rust"),
-        "ts" | "tsx" => Some("typescript"),
-        "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
-        "py" => Some("python"),
-        "go" => Some("go"),
-        _ => None,
-    }
-}
-
 struct LangSpec {
     function_kinds: &'static [&'static str],
     type_kinds: &'static [&'static str],
@@ -41,45 +30,106 @@ struct LangSpec {
     call_kinds: &'static [&'static str],
 }
 
-fn spec_for(language: &str) -> Option<LangSpec> {
-    match language {
-        "rust" => Some(LangSpec {
+/// One row per supported language — the single source of truth for
+/// extension routing, grammar loading, and node-kind tables. To add a
+/// language: add its `tree-sitter-<lang>` dep to both `Cargo.toml`s, add a
+/// row here (and a `guess_test_target` arm below if it has a test-naming
+/// convention worth detecting). No other match statement to keep in sync.
+struct LangEntry {
+    name: &'static str,
+    extensions: &'static [&'static str],
+    grammar: fn() -> Language,
+    spec: LangSpec,
+}
+
+fn lang_rust() -> Language {
+    tree_sitter_rust::LANGUAGE.into()
+}
+fn lang_typescript() -> Language {
+    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+}
+fn lang_javascript() -> Language {
+    tree_sitter_javascript::LANGUAGE.into()
+}
+fn lang_python() -> Language {
+    tree_sitter_python::LANGUAGE.into()
+}
+fn lang_go() -> Language {
+    tree_sitter_go::LANGUAGE.into()
+}
+
+static LANGS: &[LangEntry] = &[
+    LangEntry {
+        name: "rust",
+        extensions: &["rs"],
+        grammar: lang_rust,
+        spec: LangSpec {
             function_kinds: &["function_item"],
             type_kinds: &["struct_item", "enum_item", "trait_item"],
             import_kinds: &["use_declaration"],
             call_kinds: &["call_expression", "macro_invocation"],
-        }),
-        "typescript" | "javascript" => Some(LangSpec {
+        },
+    },
+    LangEntry {
+        name: "typescript",
+        extensions: &["ts", "tsx"],
+        grammar: lang_typescript,
+        spec: LangSpec {
             function_kinds: &["function_declaration", "method_definition"],
             type_kinds: &["class_declaration", "interface_declaration"],
             import_kinds: &["import_statement"],
             call_kinds: &["call_expression"],
-        }),
-        "python" => Some(LangSpec {
+        },
+    },
+    LangEntry {
+        name: "javascript",
+        extensions: &["js", "jsx", "mjs", "cjs"],
+        grammar: lang_javascript,
+        spec: LangSpec {
+            function_kinds: &["function_declaration", "method_definition"],
+            type_kinds: &["class_declaration", "interface_declaration"],
+            import_kinds: &["import_statement"],
+            call_kinds: &["call_expression"],
+        },
+    },
+    LangEntry {
+        name: "python",
+        extensions: &["py"],
+        grammar: lang_python,
+        spec: LangSpec {
             function_kinds: &["function_definition"],
             type_kinds: &["class_definition"],
             import_kinds: &["import_statement", "import_from_statement"],
             call_kinds: &["call"],
-        }),
-        "go" => Some(LangSpec {
+        },
+    },
+    LangEntry {
+        name: "go",
+        extensions: &["go"],
+        grammar: lang_go,
+        spec: LangSpec {
             function_kinds: &["function_declaration", "method_declaration"],
             type_kinds: &["type_spec"],
             import_kinds: &["import_declaration"],
             call_kinds: &["call_expression"],
-        }),
-        _ => None,
-    }
+        },
+    },
+];
+
+fn entry_for(language: &str) -> Option<&'static LangEntry> {
+    LANGS.iter().find(|e| e.name == language)
+}
+
+pub fn language_for_extension(ext: &str) -> Option<&'static str> {
+    LANGS.iter().find(|e| e.extensions.contains(&ext)).map(|e| e.name)
+}
+
+fn spec_for(language: &str) -> Option<&'static LangSpec> {
+    entry_for(language).map(|e| &e.spec)
 }
 
 fn ts_language(language: &str) -> Option<Language> {
-    match language {
-        "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
-        "typescript" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        "javascript" => Some(tree_sitter_javascript::LANGUAGE.into()),
-        "python" => Some(tree_sitter_python::LANGUAGE.into()),
-        "go" => Some(tree_sitter_go::LANGUAGE.into()),
-        _ => None,
-    }
+    entry_for(language).map(|e| (e.grammar)())
 }
 
 pub fn parse_file(path: &str, language: &str, source: &str) -> Result<ParsedFile> {
@@ -92,7 +142,7 @@ pub fn parse_file(path: &str, language: &str, source: &str) -> Result<ParsedFile
 
     let mut out = ParsedFile { nodes: Vec::new(), calls: Vec::new(), tests: Vec::new() };
     let mut fn_stack: Vec<String> = Vec::new();
-    walk(tree.root_node(), source, path, language, &spec, &mut out, &mut fn_stack);
+    walk(tree.root_node(), source, path, language, spec, &mut out, &mut fn_stack);
     Ok(out)
 }
 

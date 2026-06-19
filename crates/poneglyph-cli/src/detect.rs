@@ -297,7 +297,7 @@ fn install_skill_file(skills_dir: &Path) -> Result<bool> {
 
 const RULES_START: &str = "<!-- poneglyph:start -->";
 const RULES_END: &str = "<!-- poneglyph:end -->";
-const RULES_BODY: &str = "## poneglyph: durable memory + code graph\n\nThis project has poneglyph wired up (MCP server `poneglyph serve`). Prefer\nits tools over re-deriving things or grepping for structural code questions:\n\n- `remember` / `recall` / `get_project_context` — durable cross-session\n  memory. Call `get_project_context` at session start, `recall` before\n  re-researching something, `remember` for durable facts/decisions/preferences.\n- `codegraph_query` (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/\n  `path:<a>..<b>`) and `codegraph_blast_radius` — call/import/test graph.\n  Use instead of grep for \"what calls/imports/breaks if I change X\".\n  Requires `poneglyph graph init` to have been run once.";
+const RULES_BODY: &str = "## poneglyph: durable memory + code graph\n\nThis project has poneglyph wired up (MCP server `poneglyph serve`). Prefer\nits tools over re-deriving things or manually scanning directories:\n\n- `remember` / `recall` / `get_project_context` — durable cross-session\n  memory. Call `get_project_context` at session start, `recall` before\n  re-researching something, `remember` for durable facts/decisions/preferences.\n- `codegraph_query` (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/\n  `path:<a>..<b>`, or a bare keyword for a graph-backed name search) and\n  `codegraph_blast_radius` — call/import/test graph. ALWAYS try this FIRST\n  for \"find X\" / \"what calls/imports/breaks if I change X\" questions — it's\n  a targeted index lookup, not a directory walk, so it stays fast as the\n  codebase grows. Fall back to grep/glob only when the graph has nothing.\n  Requires `poneglyph graph init` to have been run once.";
 const RULE_FILES: [&str; 3] = ["CLAUDE.md", "AGENTS.md", ".cursorrules"];
 
 /// For each of CLAUDE.md/AGENTS.md/.cursorrules that already exists directly
@@ -406,11 +406,13 @@ pub fn render_config_template(detected: &Detected) -> String {
 
 [embedding]
 # provider = "local"        # local | ollama | openai
-# model_id = "BAAI/bge-small-en-v1.5"
+# model_id = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 50+ languages
 # model_path = "..."        # relative to data_dir, local provider only
 # dimensions = 384           # must match the vec_memories table width
 # device = "cpu"            # cpu | cuda
 # batch_size = 32
+# query_prefix = ""           # prepended when embedding search queries (e5-family models want "query: ")
+# passage_prefix = ""         # prepended when embedding stored text (e5-family models want "passage: ")
 
 [llm]
 {llm_block}

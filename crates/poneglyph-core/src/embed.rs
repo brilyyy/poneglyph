@@ -7,7 +7,7 @@ use tracing::info;
 
 use crate::config::Config;
 
-const DEFAULT_MODEL_ID: &str = "BAAI/bge-small-en-v1.5";
+const DEFAULT_MODEL_ID: &str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2";
 const DEFAULT_BATCH_SIZE: usize = 32;
 
 const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434";
@@ -26,11 +26,17 @@ enum Backend {
 pub struct Embedder {
     backend: Backend,
     dimensions: usize,
+    /// Prepended to queries / stored text respectively (e5-style models;
+    /// empty for models with no prompt convention — see `EmbeddingConfig`).
+    query_prefix: String,
+    passage_prefix: String,
 }
 
 impl Embedder {
     pub async fn new(config: &Config) -> Result<Self> {
         let dimensions = config.embedding.dimensions;
+        let query_prefix = config.embedding.query_prefix.clone();
+        let passage_prefix = config.embedding.passage_prefix.clone();
         let model_id = if config.embedding.model_id.is_empty() {
             DEFAULT_MODEL_ID.to_string()
         } else {
@@ -63,16 +69,33 @@ impl Embedder {
             }
         };
 
-        Ok(Self { backend, dimensions })
+        Ok(Self { backend, dimensions, query_prefix, passage_prefix })
     }
 
     pub fn dimensions(&self) -> usize {
         self.dimensions
     }
 
-    pub async fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
-        let results = self.embed_batch(&[text]).await?;
+    /// Embed a search query. Adds `query_prefix` (e.g. e5's "query: ") so
+    /// queries and stored passages land in the same model-expected space.
+    pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        let prefixed = format!("{}{text}", self.query_prefix);
+        let results = self.embed_batch(&[prefixed.as_str()]).await?;
         results.into_iter().next().context("empty embedding result")
+    }
+
+    /// Embed text being stored (memory content, summaries). Adds
+    /// `passage_prefix` (e.g. e5's "passage: ").
+    pub async fn embed_passage(&self, text: &str) -> Result<Vec<f32>> {
+        let prefixed = format!("{}{text}", self.passage_prefix);
+        let results = self.embed_batch(&[prefixed.as_str()]).await?;
+        results.into_iter().next().context("empty embedding result")
+    }
+
+    /// Alias for `embed_query` — kept for call sites where the role
+    /// (query vs. passage) doesn't matter or isn't worth splitting out.
+    pub async fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
+        self.embed_query(text).await
     }
 
     pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
@@ -182,7 +205,7 @@ mod tests {
     #[test]
     fn config_defaults() {
         let cfg = Config::default();
-        assert_eq!(cfg.embedding.model_id, "BAAI/bge-small-en-v1.5");
+        assert_eq!(cfg.embedding.model_id, "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2");
         assert_eq!(cfg.embedding.dimensions, 384);
         assert_eq!(cfg.embedding.provider, "local");
     }

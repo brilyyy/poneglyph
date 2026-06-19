@@ -112,7 +112,7 @@ pub async fn ingest(
     }
 
     // Embed before taking the lock (no await under the mutex).
-    let embedding = state.embed_or_none(&ev.content).await?;
+    let embedding = state.embed_passage_or_none(&ev.content).await?;
 
     let id = {
         let store = state.lock_store()?;

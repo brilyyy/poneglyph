@@ -97,7 +97,7 @@ pub async fn patch_memory(
     }
 
     // Re-embed before locking.
-    let embedding = state.embed_or_none(&body.new_content).await?;
+    let embedding = state.embed_passage_or_none(&body.new_content).await?;
 
     let updated = {
         let store = state.lock_store()?;
@@ -164,7 +164,7 @@ pub async fn search(
         return Err(ApiError::bad_request("query parameter `q` must be non-empty"));
     }
     let limit = q.limit.unwrap_or(10).clamp(1, 100);
-    let query_vec = state.embed_or_none(&q.q).await?;
+    let query_vec = state.embed_query_or_none(&q.q).await?;
 
     let store = state.lock_store()?;
     let project_id = match q.project_path.as_deref() {

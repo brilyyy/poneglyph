@@ -136,3 +136,18 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 
 Overall average: **60-90% token reduction** on common development operations.
 <!-- /rtk-instructions -->
+
+<!-- poneglyph:start -->
+## poneglyph: durable memory + code graph
+
+This project has poneglyph wired up (MCP server `poneglyph serve`). Prefer
+its tools over re-deriving things or grepping for structural code questions:
+
+- `remember` / `recall` / `get_project_context` — durable cross-session
+  memory. Call `get_project_context` at session start, `recall` before
+  re-researching something, `remember` for durable facts/decisions/preferences.
+- `codegraph_query` (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/
+  `path:<a>..<b>`) and `codegraph_blast_radius` — call/import/test graph.
+  Use instead of grep for "what calls/imports/breaks if I change X".
+  Requires `poneglyph graph init` to have been run once.
+<!-- poneglyph:end -->

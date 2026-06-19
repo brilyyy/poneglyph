@@ -28,13 +28,20 @@ impl AppState {
         self.store.lock().map_err(|_| ApiError::internal("store mutex poisoned"))
     }
 
-    pub async fn embed_or_none(&self, text: &str) -> Result<Option<Vec<f32>>, ApiError> {
+    /// Embed text being stored (memory content/edits). `None` when no
+    /// embedder is configured — callers fall back to FTS-only indexing.
+    pub async fn embed_passage_or_none(&self, text: &str) -> Result<Option<Vec<f32>>, ApiError> {
         match &self.embedder {
-            Some(e) => e
-                .embed_text(text)
-                .await
-                .map(Some)
-                .map_err(|e| ApiError::internal(e)),
+            Some(e) => e.embed_passage(text).await.map(Some).map_err(ApiError::internal),
+            None => Ok(None),
+        }
+    }
+
+    /// Embed a search query. `None` when no embedder is configured —
+    /// callers fall back to FTS-only search.
+    pub async fn embed_query_or_none(&self, text: &str) -> Result<Option<Vec<f32>>, ApiError> {
+        match &self.embedder {
+            Some(e) => e.embed_query(text).await.map(Some).map_err(ApiError::internal),
             None => Ok(None),
         }
     }

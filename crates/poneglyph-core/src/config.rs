@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 const DB_FILE: &str = "poneglyph.db";
 const MODEL_CACHE_DIR: &str = "models";
-const DEFAULT_MODEL_ID: &str = "BAAI/bge-small-en-v1.5";
+const DEFAULT_MODEL_ID: &str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2";
 const EMBED_DIM: usize = 384;
 
 /// Project-local config, relative to the current working directory. Deep-merges
@@ -56,6 +56,15 @@ pub struct EmbeddingConfig {
     pub device: String,
     /// Batch size for embedding generation.
     pub batch_size: usize,
+    /// Prepended to text embedded via `embed_query` (e.g. e5-family models
+    /// want "query: "). Empty by default — the default model has no prompt
+    /// convention; e5 users should set this.
+    #[serde(default)]
+    pub query_prefix: String,
+    /// Prepended to text embedded via `embed_passage` (e.g. e5-family models
+    /// want "passage: "). Empty by default — see `query_prefix`.
+    #[serde(default)]
+    pub passage_prefix: String,
 }
 
 impl Default for EmbeddingConfig {
@@ -67,6 +76,8 @@ impl Default for EmbeddingConfig {
             dimensions: EMBED_DIM,
             device: "cpu".to_string(),
             batch_size: 32,
+            query_prefix: String::new(),
+            passage_prefix: String::new(),
         }
     }
 }

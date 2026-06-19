@@ -281,7 +281,7 @@ pub async fn consolidate_project(
 
         // Index decoy (embedding + FTS)
         if let Some(embedder) = embedder {
-            match embedder.embed_text(&summary).await {
+            match embedder.embed_passage(&summary).await {
                 Ok(vec) => {
                     store.index_embedding(&decoy.id, &vec)?;
                     store.index_fts(&decoy.id, &summary)?;

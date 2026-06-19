@@ -4356,7 +4356,7 @@ checksum = "60f6ce597ecdcc9a098e7fddacb1065093a3d66446fa16c675e7e71d1b5c28e6"
 
 [[package]]
 name = "poneglyph-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4379,7 +4379,7 @@ dependencies = [
 
 [[package]]
 name = "poneglyph-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -4416,7 +4416,7 @@ dependencies = [
 
 [[package]]
 name = "poneglyph-http"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4437,7 +4437,7 @@ dependencies = [
 
 [[package]]
 name = "poneglyph-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "poneglyph-core",

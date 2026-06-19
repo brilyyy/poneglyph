@@ -23,6 +23,11 @@ sessions, and answer code-impact questions precisely instead of by grep.
   `codegraph_blast_radius`, not `grep`. Grep finds text matches; the code
   graph finds actual call/import/test edges — no false positives from a
   function name that also appears in a comment or string.
+- "Where is X defined / which files reference Y?" on a large codebase →
+  `codegraph_query` with a bare keyword FIRST. It's an index lookup, not a
+  directory walk, so it doesn't get slower as the repo grows. Reach for
+  grep/glob only when the graph returns nothing (e.g. before `graph init`
+  has run, or for non-code text like comments/docs/config).
 - Before spending time re-deriving something → `recall` first. It may already
   be stored from a prior session.
 
