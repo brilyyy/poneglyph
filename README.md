@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="viewer/public/logo.svg" alt="poneglyph" width="140">
+  <img src="viewer/public/logo.svg" alt="poneglyph" width="260">
 </p>
 
 <h1 align="center">poneglyph</h1>
