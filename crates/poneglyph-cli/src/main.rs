@@ -9,6 +9,7 @@ use tracing_subscriber::EnvFilter;
 
 use poneglyph_core::config::Config;
 use poneglyph_core::embed::Embedder;
+use poneglyph_core::llm::LlmClient;
 use poneglyph_core::model::{MemoryType, Source};
 use poneglyph_core::store::Store;
 
@@ -799,6 +800,18 @@ fn update_graph_lock() {
     let _ = std::fs::write(lock_path, serde_json::to_string_pretty(&lock).unwrap_or_default());
 }
 
+fn extractive_summary(top: &[&poneglyph_core::model::Memory]) -> String {
+    let text = top.iter()
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    if text.len() > 2000 {
+        format!("{}...", &text[..2000])
+    } else {
+        text
+    }
+}
+
 async fn cmd_session_summary(config: &Config, project_path: Option<&str>, latest: bool) -> Result<()> {
     config.ensure_dirs()?;
     let store = Store::open(&config.db_path)?;
@@ -843,20 +856,29 @@ async fn cmd_session_summary(config: &Config, project_path: Option<&str>, latest
         return Ok(());
     }
 
-    // Extractive summary: top 5 by importance, joined
+    // Sort by importance, take top 5
     let mut sorted = real.clone();
     sorted.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
-    let top: Vec<_> = sorted.iter().take(5).collect();
-    let summary_text = top.iter()
-        .map(|m| m.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n---\n");
+    let top: Vec<_> = sorted.iter().take(5).copied().collect();
 
-    // Truncate to ~2000 chars
-    let summary_text = if summary_text.len() > 2000 {
-        format!("{}...", &summary_text[..2000])
+    // Try LLM summarization; fall back to extractive join
+    let llm = LlmClient::from_config(&config.llm);
+    let summary_text = if let Some(client) = &llm {
+        let memories_text = top.iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        match client.complete(
+            "You summarize coding sessions for a developer's memory store. \
+             Given a few memories from one session, reply with a concise summary \
+             of what was worked on. Plain text, no preamble, 2-4 sentences.",
+            &memories_text,
+        ).await {
+            Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => extractive_summary(&top), // LLM failed, fall back
+        }
     } else {
-        summary_text
+        extractive_summary(&top)
     };
 
     // Store as a tagged memory
@@ -864,7 +886,7 @@ async fn cmd_session_summary(config: &Config, project_path: Option<&str>, latest
     let mem = store.create_memory(
         &summary_text,
         MemoryType::Semantic,
-        0.3, // low importance — summaries are context, not facts
+        0.5,
         Source::Cli,
         project_id.as_deref(),
         Some(&metadata),
@@ -873,6 +895,11 @@ async fn cmd_session_summary(config: &Config, project_path: Option<&str>, latest
 
     // Enqueue edges (non-blocking)
     let _ = poneglyph_core::enrich::enqueue_compute_edges(&store, &mem.id);
+
+    // Enqueue LLM enrichment if available
+    if llm.is_some() {
+        let _ = poneglyph_core::enrich::enqueue_llm_jobs(&store, &mem.id);
+    }
 
     println!("{}", mem.id);
     Ok(())
