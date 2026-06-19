@@ -22,6 +22,49 @@ Languages auto-detected by extension: rust, typescript, javascript, python, go.
 Per-file parsing runs in parallel (rayon); DB writes stay serial since the
 build shares one connection.
 
+All three commands update `last_build` in `.poneglyph/code-graph-lock.json`
+after a successful build.
+
+## `.poneglyphignore`
+
+Place a `.poneglyphignore` file at the project root to exclude files from
+the graph build. Syntax is gitignore-style (negation, directory anchoring,
+etc. — parsed via the `ignore` crate).
+
+- Merges with `[graph].exclude_patterns` in config (glob syntax) — either
+  source can exclude a path; neither overrides the other into inclusion.
+- Deliberately does **not** honor `.gitignore`, `.git/info/exclude`, or your
+  global gitignore, so an existing repo's `.gitignore` doesn't silently
+  change what gets graphed.
+
+`poneglyph init` creates a default `.poneglyphignore` with common
+exclusions (`node_modules/`, `target/`, `.git/`, etc.).
+
+```toml
+[graph]
+enabled = true
+exclude_patterns = ["**/target/**", "**/node_modules/**", "**/.git/**", "**/*.test.ts", "**/*_test.rs"]
+watch_delay_ms = 2000
+blast_radius_depth = 5
+max_render_nodes = 50000
+```
+
+## `.poneglyph/code-graph-lock.json`
+
+Created by `poneglyph init`. Tracks graph build state:
+
+```json
+{
+  "version": 1,
+  "created_at": "2024-01-01T00:00:00.000Z",
+  "last_build": "2024-01-15T12:30:00.000Z",
+  "languages": ["rust", "typescript", "javascript", "python", "go"]
+}
+```
+
+`last_build` is updated automatically by `poneglyph graph init`,
+`poneglyph graph update`, and `poneglyph graph watch`.
+
 ## Query the graph
 
 ```sh
@@ -45,27 +88,6 @@ poneglyph graph export --format json|dot|graphml [--out path]
 ```
 
 `--depth` defaults to `[graph].blast_radius_depth` (default `5`).
-
-## `.poneglyphignore`
-
-Place a `.poneglyphignore` file at the project root to exclude files from
-the graph build. Syntax is gitignore-style (negation, directory anchoring,
-etc. — parsed via the `ignore` crate).
-
-- Merges with `[graph].exclude_patterns` in config (glob syntax) — either
-  source can exclude a path; neither overrides the other into inclusion.
-- Deliberately does **not** honor `.gitignore`, `.git/info/exclude`, or your
-  global gitignore, so an existing repo's `.gitignore` doesn't silently
-  change what gets graphed.
-
-```toml
-[graph]
-enabled = true
-exclude_patterns = ["**/target/**", "**/node_modules/**", "**/.git/**", "**/*.test.ts", "**/*_test.rs"]
-watch_delay_ms = 2000
-blast_radius_depth = 5
-max_render_nodes = 50000
-```
 
 ## MCP tools
 

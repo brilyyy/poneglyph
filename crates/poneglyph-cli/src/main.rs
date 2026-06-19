@@ -1,6 +1,5 @@
 mod demo;
 mod detect;
-mod models;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -14,7 +13,7 @@ use poneglyph_core::model::{MemoryType, Source};
 use poneglyph_core::store::Store;
 
 /// Stone-tablet emblem, ASCII-rendered from viewer/public/logo.svg.
-/// Printed only on `init` — `serve`'s stdout is reserved for MCP JSON-RPC.
+/// Printed only on `init` — `mcp`'s stdout is reserved for MCP JSON-RPC.
 const BANNER: &str = include_str!("banner.txt");
 
 #[derive(Parser)]
@@ -30,15 +29,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Initialize database and config
-    Init {
-        /// Also inject a poneglyph usage block into CLAUDE.md/AGENTS.md/
-        /// .cursorrules in the current directory, for any of those files
-        /// that already exist. Never creates new files.
-        #[arg(long)]
-        inject_rules: bool,
-    },
+    Init,
     /// Start the MCP server (stdio) — for editor/agent integration
-    Serve,
+    Mcp,
     /// Start the web dashboard + graph viewer (HTTP) — for browsing in person
     Viewer,
     /// Store a memory
@@ -95,6 +88,11 @@ enum Command {
         #[command(subcommand)]
         action: GraphCommand,
     },
+    /// Wire up an IDE/agent with poneglyph (MCP server, hooks, plugin, skill)
+    Wire {
+        /// IDE to wire: claude-code, opencode, cursor, gemini, codex, copilot
+        ide: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -142,7 +140,7 @@ fn load_config(cli_config: &Option<PathBuf>) -> Result<Config> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Log to stderr: `poneglyph serve` speaks MCP JSON-RPC on stdout.
+    // Log to stderr: `poneglyph mcp` speaks MCP JSON-RPC on stdout.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(EnvFilter::from_default_env().add_directive("poneglyph=info".parse()?))
@@ -152,8 +150,8 @@ async fn main() -> Result<()> {
     let config = load_config(&cli.config)?;
 
     match cli.command {
-        Command::Init { inject_rules } => cmd_init(&config, inject_rules),
-        Command::Serve => cmd_serve(&config).await,
+        Command::Init => cmd_init(&config),
+        Command::Mcp => cmd_mcp(&config).await,
         Command::Viewer => cmd_viewer(&config).await,
         Command::Remember { content, r#type, importance, project, tag } => {
             cmd_remember(&config, &content, &r#type, importance, project.as_deref(), &tag).await
@@ -166,10 +164,11 @@ async fn main() -> Result<()> {
         Command::Decay => cmd_decay(&config),
         Command::Status => cmd_status(&config),
         Command::Graph { action } => cmd_graph(&config, action),
+        Command::Wire { ide } => cmd_wire(&config, &ide),
     }
 }
 
-fn cmd_init(config: &Config, inject_rules: bool) -> Result<()> {
+fn cmd_init(config: &Config) -> Result<()> {
     println!("\x1b[38;2;153;0;17m{BANNER}\x1b[0m");
 
     config.ensure_dirs().context("failed to create directories")?;
@@ -182,8 +181,7 @@ fn cmd_init(config: &Config, inject_rules: bool) -> Result<()> {
             std::fs::create_dir_all(dir).context("failed to create config directory")?;
         }
         let detected = detect::detect_local_llm();
-        let model_id = models::pick_model();
-        let toml = detect::render_config_template(&detected, Some(model_id));
+        let toml = detect::render_config_template(&detected);
         std::fs::write(&config_path, toml).context("failed to write config")?;
         println!("Config created: {}", config_path.display());
     } else {
@@ -194,23 +192,52 @@ fn cmd_init(config: &Config, inject_rules: bool) -> Result<()> {
     Store::open(&config.db_path).context("failed to initialize database")?;
     println!("Database initialized: {}", config.db_path.display());
 
-    // Auto-detect and wire up installed coding agents (MCP server + hooks).
-    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "poneglyph".to_string());
-    let hooks_dir = Config::config_dir().join("hooks");
-    println!("\nAgent integration:");
-    for outcome in detect::run_agent_setup(&config.agents, &hooks_dir, &exe)? {
-        println!("  {:<14} {}", outcome.agent, outcome.status.as_str());
+    // Create project-local .poneglyphignore (skip if exists).
+    let ignore_path = std::path::Path::new(".poneglyphignore");
+    if !ignore_path.exists() {
+        std::fs::write(ignore_path, "node_modules/\ntarget/\nvendor/\n.git/\ndist/\nbuild/\nout/\n.DS_Store\n")?;
+        println!("Created: .poneglyphignore");
     }
 
-    if inject_rules {
-        let project_dir = std::env::current_dir().context("failed to resolve current directory")?;
-        let results = detect::inject_agent_rules(&project_dir)?;
-        println!("\nRule injection:");
-        if results.is_empty() {
-            println!("  no CLAUDE.md / AGENTS.md / .cursorrules found in {}", project_dir.display());
-        }
-        for (name, changed) in results {
-            println!("  {:<14} {}", name, if changed { "updated" } else { "already up to date" });
+    // Create .poneglyph/code-graph-lock.json (skip if exists).
+    let lock_dir = std::path::Path::new(".poneglyph");
+    let lock_path = lock_dir.join("code-graph-lock.json");
+    if !lock_path.exists() {
+        std::fs::create_dir_all(lock_dir).context("failed to create .poneglyph directory")?;
+        let lock = serde_json::json!({
+            "version": 1,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "last_build": null,
+            "languages": ["rust", "typescript", "javascript", "python", "go"]
+        });
+        std::fs::write(&lock_path, serde_json::to_string_pretty(&lock)?).context("failed to write code-graph-lock.json")?;
+        println!("Created: .poneglyph/code-graph-lock.json");
+    }
+
+    println!("\nNext: run `poneglyph wire <ide>` to set up IDE integration.");
+    Ok(())
+}
+
+fn cmd_wire(config: &Config, ide: &str) -> Result<()> {
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "poneglyph".to_string());
+    let hooks_dir = Config::config_dir().join("hooks");
+
+    let outcome = detect::wire_agent(ide, &hooks_dir, &exe)?;
+    println!("{:<14} {}", outcome.agent, outcome.status.as_str());
+
+    // Auto-inject rules into global agent rule file.
+    if let Some(home) = detect::home_dir() {
+        match detect::inject_global_rules(ide, &home) {
+            Ok(changed) => {
+                if changed {
+                    println!("{:<14} rules injected", ide);
+                } else {
+                    println!("{:<14} rules already up to date", ide);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to inject global rules");
+            }
         }
     }
 
@@ -230,7 +257,7 @@ async fn try_embedder(config: &Config) -> Option<Arc<Embedder>> {
 }
 
 /// Open the store + embedder and spawn the background enrich worker — the
-/// setup shared by `serve` (MCP) and `viewer` (HTTP), each otherwise
+/// setup shared by `mcp` (MCP) and `viewer` (HTTP), each otherwise
 /// running standalone in its own process.
 async fn open_store_and_worker(
     config: &Config,
@@ -265,7 +292,7 @@ async fn open_store_and_worker(
 
 /// MCP stdio server only — for editor/agent integration. `poneglyph viewer`
 /// runs the HTTP dashboard as a separate, independent process.
-async fn cmd_serve(config: &Config) -> Result<()> {
+async fn cmd_mcp(config: &Config) -> Result<()> {
     let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
 
     // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
@@ -277,7 +304,7 @@ async fn cmd_serve(config: &Config) -> Result<()> {
 }
 
 /// HTTP dashboard + graph viewer only — for browsing in a browser.
-/// `poneglyph serve` runs the MCP server as a separate, independent process.
+/// `poneglyph mcp` runs the MCP server as a separate, independent process.
 async fn cmd_viewer(config: &Config) -> Result<()> {
     poneglyph_http::validate_security(config)?;
     let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
@@ -591,10 +618,12 @@ fn cmd_graph(config: &Config, action: GraphCommand) -> Result<()> {
         GraphCommand::Init { path } => {
             let report = codegraph::build(&store, &path, &config.graph, true)?;
             print_build_report(&report);
+            update_graph_lock();
         }
         GraphCommand::Update { path } => {
             let report = codegraph::build(&store, &path, &config.graph, false)?;
             print_build_report(&report);
+            update_graph_lock();
         }
         GraphCommand::Watch { path } => cmd_graph_watch(&store, &path, config)?,
         GraphCommand::Query { q } => {
@@ -673,12 +702,27 @@ fn cmd_graph_watch(store: &Store, path: &std::path::Path, config: &Config) -> Re
         while rx.recv_timeout(debounce).is_ok() {}
 
         match poneglyph_core::codegraph::build(store, path, &config.graph, false) {
-            Ok(report) => print_build_report(&report),
+            Ok(report) => {
+                print_build_report(&report);
+                update_graph_lock();
+            }
             Err(e) => tracing::warn!(error = %e, "graph update failed"),
         }
     }
 
     Ok(())
+}
+
+/// Update `last_build` timestamp in `.poneglyph/code-graph-lock.json`.
+fn update_graph_lock() {
+    let lock_path = std::path::Path::new(".poneglyph/code-graph-lock.json");
+    if !lock_path.exists() {
+        return;
+    }
+    let Ok(raw) = std::fs::read_to_string(lock_path) else { return };
+    let Ok(mut lock) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+    lock["last_build"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+    let _ = std::fs::write(lock_path, serde_json::to_string_pretty(&lock).unwrap_or_default());
 }
 
 fn truncate(s: &str, max_len: usize) -> String {

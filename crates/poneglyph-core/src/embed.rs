@@ -7,7 +7,7 @@ use tracing::info;
 
 use crate::config::Config;
 
-const DEFAULT_MODEL_ID: &str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2";
+const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const DEFAULT_BATCH_SIZE: usize = 32;
 
 const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434";
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn config_defaults() {
         let cfg = Config::default();
-        assert_eq!(cfg.embedding.model_id, "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2");
+        assert_eq!(cfg.embedding.model_id, "sentence-transformers/all-MiniLM-L6-v2");
         assert_eq!(cfg.embedding.dimensions, 384);
         assert_eq!(cfg.embedding.provider, "local");
     }

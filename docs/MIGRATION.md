@@ -2,7 +2,7 @@
 
 Schema version is tracked in `schema_meta.schema_version` and checked on
 every `Store::open` — migrations run automatically and in order, no manual
-step beyond starting `poneglyph` (`init`/`serve`/any CLI command). Each
+step beyond starting `poneglyph` (`init`/`mcp`/any CLI command). Each
 step below is additive; no destructive changes have been made to any
 existing column or table.
 
@@ -62,7 +62,7 @@ models (see [INSTALL.md](INSTALL.md)), but switching to a model of a
 *different* dimensionality requires a full re-embed migration — not
 supported automatically. You would need to:
 
-1. Stop `poneglyph serve` and `poneglyph viewer` (both touch the same DB)
+1. Stop `poneglyph mcp` and `poneglyph viewer` (both touch the same DB)
 2. Delete the `vec_memories` table
 3. Update `embedding.model_id` in config
 4. Run a re-embed script (not yet provided)

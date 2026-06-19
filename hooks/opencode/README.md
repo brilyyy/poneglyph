@@ -1,7 +1,6 @@
-# poneglyph — opencode passive-capture plugin
+# poneglyph — opencode plugin
 
-POSTs opencode tool executions and user/assistant messages to the local
-poneglyph `/ingest` endpoint, and logs project memory to the console on load.
+Pure-MCP plugin: uses poneglyph's MCP tools directly, no HTTP dependency.
 
 ## Install
 
@@ -15,41 +14,25 @@ mkdir -p ~/.config/opencode/plugins
 cp poneglyph.ts ~/.config/opencode/plugins/
 ```
 
-Requires `poneglyph serve` running (HTTP on `127.0.0.1:3742` by default).
+Requires `poneglyph mcp` to be configured as an MCP server in your
+`opencode.json` (done automatically by `poneglyph init`).
 
-## What gets captured
+## What it does
 
-| Event | What | Memory type |
-|---|---|---|
-| `tool.execute.after` | Write tool executions (Edit, Write, Bash, etc.) | `code_context` |
-| `message.updated` (role=user) | User prompts | `episodic` |
-| `message.updated` (role=assistant) | Assistant responses | `episodic` |
-
-Read-only tools (read, glob, grep, list, todoread, webfetch) are skipped.
-
-## Session-start context (best-effort)
-
-On plugin load, a one-shot `GET /api/context` fetches ranked project memory
-and logs it to the console (`[poneglyph] project memory: ...`). This is a
-partial parity feature with Claude Code's SessionStart hook — opencode's
-plugin factory has no return-value injection point at load time, so this
-context cannot be placed directly into the model's context the way Claude
-Code's hook stdout can. It's visible to a human watching the terminal, not
-automatically read by the agent. If opencode's plugin API ever exposes a
-hook whose return value is injected into the conversation, switch to that.
+| Hook | Behavior |
+|---|---|
+| `experimental.session.compacting` | Injects project context from `poneglyph_get_project_context` into compaction prompt |
+| `tool.execute.after` | Logs tool executions via `client.app.log()` |
+| `message.updated` | Logs user/assistant messages via `client.app.log()` |
 
 ## Environment
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `PONEGLYPH_PORT` | `3742` | HTTP port of `poneglyph serve` |
-| `PONEGLYPH_TOKEN` | unset | Bearer token, required if `server.api_token` is set |
-| `PONEGLYPH_CONTEXT_TOKENS` | `600` | Token budget for the session-start context fetch |
+No environment variables needed — the plugin communicates through the MCP
+server, not HTTP.
 
 ## Caveat
 
 opencode's plugin API changes between versions — if capture doesn't work,
-check the hook names (`tool.execute.after`, `message.updated`) against your
-installed version's plugin docs (https://opencode.ai/docs/plugins/).
-The plugin never blocks the agent: all failures are swallowed with a 2s fetch
-timeout.
+check the hook names against your installed version's plugin docs
+(https://opencode.ai/docs/plugins/). The plugin never blocks the agent:
+all failures are swallowed.

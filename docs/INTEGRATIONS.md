@@ -1,7 +1,7 @@
 # Integrations
 
 poneglyph integrates with Claude Code, Claude Desktop, and OpenCode through
-hooks and MCP tools.
+hooks, MCP tools, and plugins.
 
 ## Claude Code (hooks)
 
@@ -9,9 +9,9 @@ Hooks auto-capture tool executions, user prompts, and assistant messages as
 passive memories. Session context is injected on new sessions.
 
 Hooks POST to the `/ingest` HTTP endpoint, so they need **`poneglyph
-viewer`** running in the background (not `poneglyph serve`, which is
+viewer`** running in the background (not `poneglyph mcp`, which is
 MCP-only). If you also want MCP tools (`remember`/`recall`/`codegraph_query`)
-in Claude Code, run `poneglyph serve` as well — they're independent
+in Claude Code, run `poneglyph mcp` as well — they're independent
 processes against the same database.
 
 ### Install hooks
@@ -29,7 +29,7 @@ and `codegraph_query`/`codegraph_blast_radius` instead of ad-hoc grepping:
 
 ```sh
 mkdir -p ~/.claude/skills/poneglyph
-cp hooks/poneglyph/SKILL.md ~/.claude/skills/poneglyph/SKILL.md
+cp skills/poneglyph/SKILL.md ~/.claude/skills/poneglyph/SKILL.md
 ```
 
 (Or project-scoped: `.claude/skills/poneglyph/SKILL.md`.)
@@ -123,7 +123,7 @@ macOS):
   "mcpServers": {
     "poneglyph": {
       "command": "/path/to/poneglyph",
-      "args": ["serve"]
+      "args": ["mcp"]
     }
   }
 }
@@ -145,11 +145,32 @@ macOS):
 Both codegraph tools require `poneglyph graph init` to have been run first
 — see [CODEGRAPH.md](CODEGRAPH.md).
 
-## OpenCode (plugin)
+## OpenCode (MCP + plugin)
 
-The plugin auto-captures tool executions and assistant messages.
+OpenCode connects to poneglyph via MCP stdio and uses a plugin for session
+compaction and structured logging.
+
+### Configure MCP server
+
+`poneglyph init` automatically adds the MCP entry to
+`~/.config/opencode/opencode.json`. Manual config:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "poneglyph": {
+      "command": ["poneglyph", "mcp"],
+      "enabled": true
+    }
+  }
+}
+```
 
 ### Install plugin
+
+The plugin injects project context into session compaction and logs tool
+executions. Pure MCP — no HTTP dependency.
 
 ```sh
 # Project-level
@@ -161,17 +182,16 @@ mkdir -p ~/.config/opencode/plugins
 cp hooks/opencode/poneglyph.ts ~/.config/opencode/plugins/
 ```
 
-### What gets captured
+### Install the skill
 
-| Event | Memory type |
-|---|---|
-| `tool.execute.after` (write tools) | `code_context` |
-| `message.updated` (assistant messages) | `episodic` |
+Teaches OpenCode when to use poneglyph's MCP tools:
 
-### Environment
+```sh
+mkdir -p ~/.config/opencode/skills/poneglyph
+cp skills/poneglyph/SKILL.md ~/.config/opencode/skills/poneglyph/SKILL.md
+```
 
-Same as Claude Code: `PONEGLYPH_PORT` (default 3742), `PONEGLYPH_TOKEN` if
-`server.api_token` is set.
+(Or project-scoped: `.opencode/skills/poneglyph/SKILL.md`.)
 
 ## Environment variables
 

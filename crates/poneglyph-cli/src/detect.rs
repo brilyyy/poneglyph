@@ -14,7 +14,7 @@ const USERPROMPTSUBMIT_SH: &str = include_str!("../../../hooks/claude-code/userp
 const STOP_SH: &str = include_str!("../../../hooks/claude-code/stop.sh");
 const SESSIONSTART_SH: &str = include_str!("../../../hooks/claude-code/sessionstart.sh");
 const OPENCODE_PLUGIN_TS: &str = include_str!("../../../hooks/opencode/poneglyph.ts");
-const SKILL_MD: &str = include_str!("../../../hooks/poneglyph/SKILL.md");
+const SKILL_MD: &str = include_str!("../../../skills/poneglyph/SKILL.md");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupStatus {
@@ -61,6 +61,39 @@ pub fn run_agent_setup(agents: &AgentsConfig, hooks_dir: &Path, exe: &str) -> Re
     ];
 
     Ok(out)
+}
+
+/// Wire up a single agent by name. Always enabled (ignores config flags).
+pub fn wire_agent(ide: &str, hooks_dir: &Path, exe: &str) -> Result<SetupOutcome> {
+    let Some(home) = home_dir() else {
+        anyhow::bail!("could not resolve home directory");
+    };
+    match ide {
+        "claude-code" => setup_claude_code(true, &home, hooks_dir, exe),
+        "opencode" => setup_opencode(true, &home, exe),
+        "cursor" => setup_cursor(true, &home, exe),
+        "gemini" => setup_gemini_cli(true, &home, exe),
+        "codex" => setup_codex(true, &home, exe),
+        "copilot" => setup_copilot_cli(true, &home, exe),
+        _ => anyhow::bail!("unknown IDE '{ide}'. Options: claude-code, opencode, cursor, gemini, codex, copilot"),
+    }
+}
+
+/// Inject poneglyph usage rules into the global agent rule file.
+pub fn inject_global_rules(ide: &str, home: &Path) -> Result<bool> {
+    let path = match ide {
+        "claude-code" => home.join(".claude").join("CLAUDE.md"),
+        "opencode" => home.join(".config").join("opencode").join("AGENTS.md"),
+        "cursor" => home.join(".cursor").join("rules"),
+        "gemini" => home.join(".gemini").join("rules"),
+        "codex" => home.join(".codex").join("rules"),
+        "copilot" => home.join(".copilot").join("rules"),
+        _ => return Ok(false),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    inject_rules_block(&path)
 }
 
 fn setup_claude_code(enabled: bool, home: &Path, hooks_dir: &Path, exe: &str) -> Result<SetupOutcome> {
@@ -117,8 +150,9 @@ fn setup_opencode(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome>
         return Ok(SetupOutcome { agent: "opencode", status: SetupStatus::NotDetected });
     }
     let plugin_changed = install_opencode_plugin(&opencode_dir.join("plugins"))?;
-    let mcp_changed = merge_json_mcp_server(&opencode_dir.join("opencode.json"), "mcp", false, exe)?;
-    let status = if plugin_changed || mcp_changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured };
+    let mcp_changed = merge_opencode_mcp_server(&opencode_dir.join("opencode.json"), exe)?;
+    let skill_changed = install_opencode_skill(&opencode_dir.join("skills"))?;
+    let status = if plugin_changed || mcp_changed || skill_changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured };
     Ok(SetupOutcome { agent: "opencode", status })
 }
 
@@ -226,7 +260,7 @@ fn merge_json_mcp_server(path: &Path, top_key: &str, include_type_stdio: bool, e
     if servers.contains_key("poneglyph") {
         return Ok(false);
     }
-    let mut entry = json!({ "command": exe, "args": ["serve"] });
+    let mut entry = json!({ "command": exe, "args": ["mcp"] });
     if include_type_stdio {
         entry["type"] = json!("stdio");
     }
@@ -254,7 +288,7 @@ fn merge_codex_mcp_server(path: &Path, exe: &str) -> Result<bool> {
     }
     let mut entry = toml::value::Table::new();
     entry.insert("command".into(), toml::Value::String(exe.into()));
-    entry.insert("args".into(), toml::Value::Array(vec![toml::Value::String("serve".into())]));
+    entry.insert("args".into(), toml::Value::Array(vec![toml::Value::String("mcp".into())]));
     servers.insert("poneglyph".into(), toml::Value::Table(entry));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
@@ -271,6 +305,34 @@ fn install_opencode_plugin(plugin_dir: &Path) -> Result<bool> {
     let stale = !path.exists() || std::fs::read_to_string(&path).map(|s| s != OPENCODE_PLUGIN_TS).unwrap_or(true);
     if stale {
         std::fs::write(&path, OPENCODE_PLUGIN_TS).with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(stale)
+}
+
+/// Idempotently insert a `poneglyph` MCP entry in opencode's JSON config.
+/// OpenCode uses array command format: `{ "command": ["poneglyph", "mcp"] }`.
+fn merge_opencode_mcp_server(path: &Path, exe: &str) -> Result<bool> {
+    let mut root = read_json_object(path)?;
+    let obj = root.as_object_mut().with_context(|| format!("{} root must be a JSON object", path.display()))?;
+    let servers_val = obj.entry("mcp").or_insert_with(|| json!({}));
+    let servers = servers_val.as_object_mut().context("\"mcp\" key must be a JSON object")?;
+    if servers.contains_key("poneglyph") {
+        return Ok(false);
+    }
+    let entry = json!({ "command": [exe, "mcp"] });
+    servers.insert("poneglyph".to_string(), entry);
+    write_json(path, &root)?;
+    Ok(true)
+}
+
+/// Write the bundled poneglyph skill into opencode's skills directory.
+fn install_opencode_skill(skills_dir: &Path) -> Result<bool> {
+    let dir = skills_dir.join("poneglyph");
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let path = dir.join("SKILL.md");
+    let stale = !path.exists() || std::fs::read_to_string(&path).map(|s| s != SKILL_MD).unwrap_or(true);
+    if stale {
+        std::fs::write(&path, SKILL_MD).with_context(|| format!("failed to write {}", path.display()))?;
     }
     Ok(stale)
 }
@@ -297,7 +359,7 @@ fn install_skill_file(skills_dir: &Path) -> Result<bool> {
 
 const RULES_START: &str = "<!-- poneglyph:start -->";
 const RULES_END: &str = "<!-- poneglyph:end -->";
-const RULES_BODY: &str = "## poneglyph: durable memory + code graph\n\nThis project has poneglyph wired up (MCP server `poneglyph serve`). Prefer\nits tools over re-deriving things or manually scanning directories:\n\n- `remember` / `recall` / `get_project_context` — durable cross-session\n  memory. Call `get_project_context` at session start, `recall` before\n  re-researching something, `remember` for durable facts/decisions/preferences.\n- `codegraph_query` (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/\n  `path:<a>..<b>`, or a bare keyword for a graph-backed name search) and\n  `codegraph_blast_radius` — call/import/test graph. ALWAYS try this FIRST\n  for \"find X\" / \"what calls/imports/breaks if I change X\" questions — it's\n  a targeted index lookup, not a directory walk, so it stays fast as the\n  codebase grows. Fall back to grep/glob only when the graph has nothing.\n  Requires `poneglyph graph init` to have been run once.";
+const RULES_BODY: &str = "## poneglyph: durable memory + code graph\n\nThis project has poneglyph wired up (MCP server `poneglyph mcp`). Prefer\nits tools over re-deriving things or manually scanning directories:\n\n- `remember` / `recall` / `get_project_context` — durable cross-session\n  memory. Call `get_project_context` at session start, `recall` before\n  re-researching something, `remember` for durable facts/decisions/preferences.\n- `codegraph_query` (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/\n  `path:<a>..<b>`, or a bare keyword for a graph-backed name search) and\n  `codegraph_blast_radius` — call/import/test graph. ALWAYS try this FIRST\n  for \"find X\" / \"what calls/imports/breaks if I change X\" questions — it's\n  a targeted index lookup, not a directory walk, so it stays fast as the\n  codebase grows. Fall back to grep/glob only when the graph has nothing.\n  Requires `poneglyph graph init` to have been run once.";
 const RULE_FILES: [&str; 3] = ["CLAUDE.md", "AGENTS.md", ".cursorrules"];
 
 /// For each of CLAUDE.md/AGENTS.md/.cursorrules that already exists directly
@@ -318,8 +380,13 @@ pub fn inject_agent_rules(project_dir: &Path) -> Result<Vec<(String, bool)>> {
 
 /// Replace the block between `RULES_START`/`RULES_END` markers if present,
 /// else append one. Returns whether the file content actually changed.
+/// Creates the file if it doesn't exist.
 fn inject_rules_block(path: &Path) -> Result<bool> {
-    let existing = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let existing = if path.exists() {
+        std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?
+    } else {
+        String::new()
+    };
     let block = format!("{RULES_START}\n{RULES_BODY}\n{RULES_END}");
 
     let new_content = match (existing.find(RULES_START), existing.find(RULES_END)) {
@@ -335,6 +402,9 @@ fn inject_rules_block(path: &Path) -> Result<bool> {
 
     if new_content == existing {
         return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     }
     std::fs::write(path, new_content).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(true)
@@ -386,9 +456,8 @@ pub fn detect_local_llm() -> Detected {
 
 /// Render a full `config.toml`: every key from the schema is present, but
 /// commented (so the figment defaults layer applies) unless detection found
-/// a concrete value worth uncommenting, or the caller picked an explicit
-/// `model_id` (e.g. from the `init`-time model picker in `models.rs`).
-pub fn render_config_template(detected: &Detected, model_id: Option<&str>) -> String {
+/// a concrete value worth uncommenting.
+pub fn render_config_template(detected: &Detected) -> String {
     let llm_block = match (detected.llm_provider, detected.llm_base_url) {
         (Some(provider), Some(base_url)) => format!(
             "enabled = true\nprovider = \"{provider}\"  # openai | anthropic | gemini | ollama | lmstudio | gpt4all  (each needs a matching --features llm-* build)\nbase_url = \"{base_url}\"\n# model = \"...\"\n# api_key = \"...\"  # prefer PONEGLYPH_LLM_API_KEY env var\ntimeout_seconds = 60\nmax_generation_tokens = 2048"
@@ -396,12 +465,7 @@ pub fn render_config_template(detected: &Detected, model_id: Option<&str>) -> St
         _ => "# enabled = false\n# provider = \"ollama\"  # openai | anthropic | gemini | ollama | lmstudio | gpt4all  (each needs a matching --features llm-* build)\n# base_url = \"http://localhost:11434/v1\"\n# model = \"...\"\n# api_key = \"...\"  # prefer PONEGLYPH_LLM_API_KEY env var\n# timeout_seconds = 60\n# max_generation_tokens = 2048".to_string(),
     };
 
-    let embedding_block = match model_id {
-        Some(id) => format!(
-            "# provider = \"local\"        # local | ollama | openai\nmodel_id = \"{id}\"\n# model_path = \"...\"        # relative to data_dir, local provider only\ndimensions = 384\n# device = \"cpu\"            # cpu | cuda\n# batch_size = 32\n# query_prefix = \"\"           # prepended when embedding search queries (e5-family models want \"query: \")\n# passage_prefix = \"\"         # prepended when embedding stored text (e5-family models want \"passage: \")"
-        ),
-        None => "# provider = \"local\"        # local | ollama | openai\n# model_id = \"sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2\"  # 50+ languages\n# model_path = \"...\"        # relative to data_dir, local provider only\n# dimensions = 384           # must match the vec_memories table width\n# device = \"cpu\"            # cpu | cuda\n# batch_size = 32\n# query_prefix = \"\"           # prepended when embedding search queries (e5-family models want \"query: \")\n# passage_prefix = \"\"         # prepended when embedding stored text (e5-family models want \"passage: \")".to_string(),
-    };
+    let embedding_block = "# provider = \"local\"        # local | ollama | openai\nmodel_id = \"sentence-transformers/all-MiniLM-L6-v2\"\n# model_path = \"...\"        # relative to data_dir, local provider only\ndimensions = 384\n# device = \"cpu\"            # cpu | cuda\n# batch_size = 32\n# query_prefix = \"\"           # prepended when embedding search queries (e5-family models want \"query: \")\n# passage_prefix = \"\"         # prepended when embedding stored text (e5-family models want \"passage: \")";
 
     format!(
         r#"# Poneglyph configuration. Commented keys use built-in defaults; uncomment
@@ -531,6 +595,32 @@ mod tests {
         merge_json_mcp_server(&path, "mcp", false, "poneglyph").unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(v["mcp"]["poneglyph"].get("type").is_none());
+        assert_eq!(v["mcp"]["poneglyph"]["args"][0], "mcp");
+    }
+
+    #[test]
+    fn merge_opencode_mcp_server_uses_array_command() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+
+        let changed = merge_opencode_mcp_server(&path, "poneglyph").unwrap();
+        assert!(changed);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["mcp"]["poneglyph"]["command"][0], "poneglyph");
+        assert_eq!(v["mcp"]["poneglyph"]["command"][1], "mcp");
+        assert!(v["mcp"]["poneglyph"].get("args").is_none());
+
+        let changed2 = merge_opencode_mcp_server(&path, "poneglyph").unwrap();
+        assert!(!changed2, "second merge must be a no-op");
+    }
+
+    #[test]
+    fn install_opencode_skill_writes_then_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        assert!(install_opencode_skill(&skills_dir).unwrap());
+        assert!(skills_dir.join("poneglyph/SKILL.md").exists());
+        assert!(!install_opencode_skill(&skills_dir).unwrap(), "unchanged content must be a no-op");
     }
 
     #[test]
@@ -578,6 +668,7 @@ mod tests {
         assert!(changed1);
         let v: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         assert_eq!(v["mcp_servers"]["poneglyph"]["command"].as_str(), Some("poneglyph"));
+        assert_eq!(v["mcp_servers"]["poneglyph"]["args"][0].as_str(), Some("mcp"));
 
         let changed2 = merge_codex_mcp_server(&path, "poneglyph").unwrap();
         assert!(!changed2, "second merge must be a no-op");
@@ -642,7 +733,7 @@ mod tests {
     #[test]
     fn render_config_template_uncomments_detected_llm_provider() {
         let detected = Detected { llm_provider: Some("ollama"), llm_base_url: Some("http://localhost:11434/v1") };
-        let toml = render_config_template(&detected, None);
+        let toml = render_config_template(&detected);
         assert!(toml.contains("provider = \"ollama\""));
         assert!(toml.contains("enabled = true"));
         // Every other section stays commented.
@@ -654,17 +745,17 @@ mod tests {
     #[test]
     fn render_config_template_comments_llm_when_nothing_detected() {
         let detected = Detected { llm_provider: None, llm_base_url: None };
-        let toml = render_config_template(&detected, None);
+        let toml = render_config_template(&detected);
         assert!(toml.contains("# enabled = false"));
         assert!(!toml.contains("\nenabled = true"));
         let _: toml::Table = toml.parse().expect("fully-commented template must still be valid TOML");
     }
 
     #[test]
-    fn render_config_template_uncomments_picked_model() {
+    fn render_config_template_uses_default_model() {
         let detected = Detected { llm_provider: None, llm_base_url: None };
-        let toml = render_config_template(&detected, Some("BAAI/bge-small-en-v1.5"));
-        assert!(toml.contains("model_id = \"BAAI/bge-small-en-v1.5\""));
+        let toml = render_config_template(&detected);
+        assert!(toml.contains("model_id = \"sentence-transformers/all-MiniLM-L6-v2\""));
         assert!(toml.contains("\ndimensions = 384"));
         let parsed: toml::Table = toml.parse().expect("template must be valid TOML");
         assert!(parsed.contains_key("embedding"));

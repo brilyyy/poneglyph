@@ -43,11 +43,11 @@ cargo build --release --features llm-anthropic   # or llm-openai, llm-gemini, ll
 ## First run
 
 ```sh
-# Create database + default config (interactively picks an embedding model)
+# Create database + default config
 poneglyph init
 
 # Start the MCP server (for your editor/agent)
-poneglyph serve
+poneglyph mcp
 
 # Start the web dashboard + graph viewer (separate process)
 poneglyph viewer
@@ -57,12 +57,12 @@ poneglyph viewer
 - Config: `~/.config/poneglyph/config.toml`
 - Database: `~/.local/share/poneglyph/poneglyph.db`
 - Model cache: `~/.cache/poneglyph/models/`
+- Project-local: `.poneglyphignore` and `.poneglyph/code-graph-lock.json`
 
 ## Model download
 
-On first `recall`, `remember`, `serve`, or `viewer`, the embedding model
-picked at `poneglyph init` (default
-`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`) downloads to
+On first `recall`, `remember`, `mcp`, or `viewer`, the embedding model
+(default `sentence-transformers/all-MiniLM-L6-v2`) downloads to
 `~/.cache/poneglyph/models/`. After this, everything runs **fully offline**.
 
 ## Verify
@@ -87,7 +87,7 @@ port = 3742
 host = "127.0.0.1"
 
 [embedding]
-model_id = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+model_id = "sentence-transformers/all-MiniLM-L6-v2"
 dimensions = 384
 
 [llm]
@@ -126,7 +126,7 @@ Environment variables override config (prefix `PONEGLYPH_`):
 | Command | Purpose |
 |---|---|
 | `poneglyph init` | Create db + default config |
-| `poneglyph serve` | Start the MCP server (stdio) — editor/agent integration |
+| `poneglyph mcp` | Start the MCP server (stdio) — editor/agent integration |
 | `poneglyph viewer` | Start the web dashboard + graph viewer (HTTP), separate process |
 | `poneglyph remember "<text>"` | Store a memory |
 | `poneglyph recall "<query>"` | Search memories |

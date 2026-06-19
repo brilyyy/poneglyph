@@ -13,8 +13,8 @@
 
 poneglyph gives Claude Code, Cursor, OpenCode, Codex, and Copilot CLI a
 memory that survives between sessions, plus a code knowledge graph they can
-query instead of grepping. One binary, SQLite, your choice of embedding
-model — everything local unless you opt into LLM enrichment.
+query instead of grepping. One binary, SQLite, local embedding model —
+everything offline unless you opt into LLM enrichment.
 
 ## Why "poneglyph"?
 
@@ -45,13 +45,13 @@ instead of starting from zero every time.
   edit; no separate watch process to remember to run
 
 **Running it**
-- MCP server (`poneglyph serve`) — 6 memory tools + 2 codegraph tools for
+- MCP server (`poneglyph mcp`) — 6 memory tools + 2 codegraph tools for
   any MCP-aware client
 - Web dashboard (`poneglyph viewer`) — GPU-rendered (WebGL) graph explorer
   that scales past what a DOM renderer can handle, plus search, timeline,
   and settings
-- Multilingual embeddings by default — `poneglyph init` walks you through
-  3 model choices, multilingual to English-only, with pros/cons
+- Fast local embeddings — `all-MiniLM-L6-v2` by default (384d), fully
+  offline after first model download
 - Optional LLM enrichment — summarize, extract entities/relations, score
   importance, semantic compression; off by default, opt-in per provider
   at build time
@@ -65,7 +65,7 @@ instead of starting from zero every time.
    ```
 2. **Run the MCP server** for your editor/agent:
    ```sh
-   poneglyph serve
+   poneglyph mcp
    ```
 3. **Or open the web dashboard** (separate process):
    ```sh
@@ -80,7 +80,7 @@ git clone https://github.com/brilyyy/poneglyph.git
 cd poneglyph
 cargo build --release
 ./target/release/poneglyph init
-./target/release/poneglyph serve   # MCP, for editor/agent integration
+./target/release/poneglyph mcp      # MCP, for editor/agent integration
 ```
 
 LLM-backed enrichment/compression is opt-in per provider and not compiled in
@@ -112,14 +112,14 @@ open http://127.0.0.1:3742
 <summary>Crate and directory layout</summary>
 
 ```
-poneglyph-cli       ── clap binary (init, serve, viewer, remember, recall, demo, ...)
+poneglyph-cli       ── clap binary (init, mcp, viewer, remember, recall, demo, ...)
 poneglyph-http      ── axum server (/ingest, /api/*, embedded viewer)
 poneglyph-mcp       ── rmcp stdio server (8 tools: memory + codegraph)
 poneglyph-core      ── store, embed, retrieve, graph, codegraph, compress, enrich, llm, config
 viewer/             ── TanStack Router + React SPA; graph views render via cosmos.gl (WebGL)
 hooks/claude-code/  ── bash hooks (posttooluse, userpromptsubmit, stop, sessionstart)
-hooks/opencode/     ── TypeScript plugin
-hooks/poneglyph/    ── Claude Code skill (SKILL.md)
+hooks/opencode/     ── TypeScript plugin (pure MCP, no HTTP dependency)
+skills/poneglyph/   ── Claude Code / OpenCode skill (SKILL.md)
 ```
 
 </details>
@@ -131,7 +131,7 @@ TOML at `~/.config/poneglyph/config.toml` (XDG). Key settings:
 | Setting | Default | Purpose |
 |---|---|---|
 | `dashboard.port` | `3742` | `poneglyph viewer` HTTP port |
-| `embedding.model_id` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Embedding model (384d); picked interactively at `poneglyph init` |
+| `embedding.model_id` | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model (384d) |
 | `llm.enabled` | `false` | Optional LLM enrichment (also needs a matching `--features llm-*` build) |
 | `enrichment.enabled` | `false` | Enable enrichment jobs |
 

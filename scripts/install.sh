@@ -13,7 +13,6 @@ hdr()  { echo -e "\n${BOLD}$*${RESET}"; }
 # ── defaults ──────────────────────────────────────────────────────────────────
 SKIP_BUILD=false
 SYSTEM=false
-INSTALL_HOOKS=false
 NO_INIT=false
 YES=false
 
@@ -22,15 +21,13 @@ for arg in "$@"; do
   case "$arg" in
     --skip-build) SKIP_BUILD=true ;;
     --system)     SYSTEM=true ;;
-    --hooks)      INSTALL_HOOKS=true ;;
     --no-init)    NO_INIT=true ;;
     --yes)        YES=true ;;
     --help|-h)
-      echo "Usage: $0 [--skip-build] [--system] [--hooks] [--no-init] [--yes]"
+      echo "Usage: $0 [--skip-build] [--system] [--no-init] [--yes]"
       echo ""
       echo "  --skip-build   Use existing target/release/poneglyph (skip build)"
       echo "  --system       Install to /usr/local/bin (requires sudo)"
-      echo "  --hooks        Copy Claude Code hooks to ~/.config/poneglyph/hooks/"
       echo "  --no-init      Skip running 'poneglyph init' after install"
       echo "  --yes          Non-interactive, accept all defaults"
       exit 0
@@ -198,36 +195,6 @@ if ! echo ":$PATH:" | grep -q ":$INSTALL_DIR:"; then
   warn "Add this to your shell rc: export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
-# ── hooks ─────────────────────────────────────────────────────────────────────
-if [[ "$INSTALL_HOOKS" == false && "$YES" == false ]]; then
-  hdr "Claude Code hooks"
-  reply=""
-  if [[ -t 0 ]]; then
-    read -r -p "Install Claude Code hooks to ~/.config/poneglyph/hooks/? [y/N] " reply
-  elif { read -r -p "Install Claude Code hooks to ~/.config/poneglyph/hooks/? [y/N] " reply; } 2>/dev/null < /dev/tty; then
-    :
-  else
-    warn "Non-interactive shell — skipping hooks prompt (pass --hooks to install them)"
-  fi
-  [[ "$reply" =~ ^[Yy]$ ]] && INSTALL_HOOKS=true
-fi
-
-if [[ "$INSTALL_HOOKS" == true ]]; then
-  if [[ -z "$SOURCE_DIR" ]]; then
-    clone_repo
-    SOURCE_DIR="$CLONE_DIR"
-  fi
-  HOOKS_DEST="$HOME/.config/poneglyph/hooks"
-  mkdir -p "$HOOKS_DEST"
-  cp "$SOURCE_DIR/hooks/claude-code/posttooluse.sh"      "$HOOKS_DEST/"
-  cp "$SOURCE_DIR/hooks/claude-code/sessionstart.sh"     "$HOOKS_DEST/"
-  cp "$SOURCE_DIR/hooks/claude-code/stop.sh"              "$HOOKS_DEST/"
-  cp "$SOURCE_DIR/hooks/claude-code/userpromptsubmit.sh" "$HOOKS_DEST/"
-  chmod +x "$HOOKS_DEST"/*.sh
-  ok "Hooks installed: $HOOKS_DEST"
-  warn "Wire hooks in Claude Code: see hooks/claude-code/settings.json.example"
-fi
-
 # ── init ──────────────────────────────────────────────────────────────────────
 if [[ "$NO_INIT" == false ]]; then
   hdr "Running poneglyph init"
@@ -240,8 +207,10 @@ hdr "Done"
 ok "poneglyph $("$INSTALL_PATH" --version 2>&1 | head -1)"
 echo ""
 echo "Next steps:"
-echo "  poneglyph serve           # start MCP + HTTP server"
-echo "  open http://127.0.0.1:3742  # web viewer"
-echo "  poneglyph --help          # all commands"
+echo "  poneglyph wire claude-code  # wire up Claude Code"
+echo "  poneglyph wire opencode     # wire up OpenCode"
+echo "  poneglyph mcp               # start MCP server"
+echo "  poneglyph viewer            # start web dashboard"
+echo "  poneglyph --help            # all commands"
 echo ""
 echo "Docs: docs/INTEGRATIONS.md (Claude Code, Claude Desktop, OpenCode)"

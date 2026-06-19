@@ -1,8 +1,0 @@
-{
-  "1": "Delete stale top-level src/main.rs",
-  "2": "Implement core::model",
-  "3": "Implement core::config",
-  "4": "Implement core::store + migration runner",
-  "5": "Implement `poneglyph init` CLI command",
-  "6": "Add CI workflow"
-}

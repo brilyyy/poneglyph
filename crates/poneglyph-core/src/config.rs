@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 const DB_FILE: &str = "poneglyph.db";
 const MODEL_CACHE_DIR: &str = "models";
-const DEFAULT_MODEL_ID: &str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2";
+const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const EMBED_DIM: usize = 384;
 
 /// Project-local config, relative to the current working directory. Deep-merges

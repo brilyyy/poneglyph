@@ -44,7 +44,7 @@ ok "Found: $INSTALL_PATH"
 # ── stop server ───────────────────────────────────────────────────────────────
 hdr "Stopping server"
 
-if pkill -f "poneglyph serve" 2>/dev/null; then
+if pkill -f "poneglyph mcp" 2>/dev/null; then
   ok "Server stopped"
 else
   ok "No running server found"

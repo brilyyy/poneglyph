@@ -44,7 +44,7 @@ ALTER TABLE memories ADD COLUMN compression_mode    TEXT;
 ```
 
 Additive only — no migration steps beyond the normal migration runner
-(`poneglyph init` / first `serve` after upgrading). See
+(`poneglyph init` / first `mcp` after upgrading). See
 [MIGRATION.md](MIGRATION.md) for the version history.
 
 ## Checking savings
