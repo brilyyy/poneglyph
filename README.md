@@ -1,44 +1,77 @@
 <p align="center">
-  <img src="viewer/public/logo.svg" alt="poneglyph" width="120">
+  <img src="viewer/public/logo.svg" alt="poneglyph" width="140">
 </p>
 
-# poneglyph
+<h1 align="center">poneglyph</h1>
+<p align="center"><em>Local, persistent memory for coding agents.</em></p>
 
-Local AI memory engine for coding agents. Remembers what your tools do so your
-agent has project context across sessions.
+<p align="center">
+  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
+  <img src="https://github.com/brilyyy/poneglyph/actions/workflows/release.yml/badge.svg" alt="Release build status">
+  <img src="https://img.shields.io/badge/rust-%23000000.svg?logo=rust&logoColor=white" alt="Built with Rust">
+</p>
+
+poneglyph gives Claude Code, Cursor, OpenCode, Codex, and Copilot CLI a
+memory that survives between sessions, plus a code knowledge graph they can
+query instead of grepping. One binary, SQLite, your choice of embedding
+model — everything local unless you opt into LLM enrichment.
+
+## Why "poneglyph"?
+
+In *One Piece*, poneglyphs are indestructible stone tablets that record
+history the World Government tried to erase — knowledge too important to
+lose, carved somewhere it can't be deleted. That's the job this does for
+your agent: project memory that survives context resets and new sessions
+instead of starting from zero every time.
 
 ## Features
 
-- **Hybrid retrieval** — dense embeddings (384d) + FTS5 + 1-hop graph expansion with RRF fusion
-- **Knowledge graph** — explicit, similarity, temporal, tag-overlap, and optional LLM relation edges
-- **Code knowledge graph** — Tree-sitter parsed callers/callees/imports/tests across rust/ts/js/python/go, with `.poneglyphignore` support, parallel (rayon) parsing, and a `path:<a>..<b>` shortest-chain query
-- **MCP server** — 6 memory tools (remember, recall, forget, update, context, list) + 2 codegraph tools (`codegraph_query`, `codegraph_blast_radius`)
-- **Claude Code skill + OpenCode plugin** — teaches agents when to use memory/codegraph tools instead of ad-hoc grepping; `poneglyph init --inject-rules` can also inject a condensed usage block into an existing `CLAUDE.md`/`AGENTS.md`/`.cursorrules`
-- **Self-healing code graph** — the PostToolUse hook debounce-triggers `graph update` after source edits, so `codegraph_query`/`codegraph_blast_radius` stay fresh without a separate watch process
-- **Passive capture** — Claude Code hooks + OpenCode plugin auto-capture tool executions, prompts, and assistant messages
-- **Web viewer** — dashboard, memories list/detail, search, timeline, token-savings, agent status, settings, and a GPU-rendered (WebGL) graph explorer + codegraph view that scales well past what a DOM-based renderer can handle, with a "showing X of Y" sampling indicator and render-limit slider. Runs as its own command (`poneglyph viewer`), independent of the MCP server (`poneglyph serve`)
-- **Zero-token context injection** — session context from your project's memories, no LLM calls
-- **Multilingual embeddings by default** — `poneglyph init` interactively offers 3 curated 384d models spanning multilingual to English-only, with pros/cons for each
-- **Optional LLM enrichment** — summarize, extract entities/relations, score importance, semantic compression (off by default, and not compiled in unless you build with `--features llm-openai`/`llm-anthropic`/`llm-gemini`/`llm-all`)
-- **Fully offline** — after first-run model download, everything runs locally
+**Memory**
+- Hybrid retrieval — dense embeddings + FTS5 keyword search + 1-hop graph
+  expansion, fused with RRF
+- Knowledge graph — explicit, similarity, temporal, and tag-overlap edges,
+  plus optional LLM-labeled relations
+- Zero-token context injection — ranked project memory loaded into a new
+  session, no LLM calls
+- Passive capture — Claude Code hooks and the OpenCode plugin record tool
+  calls, prompts, and replies automatically
+
+**Code intelligence**
+- Tree-sitter code graph — callers, callees, imports, and tests across
+  Rust, TypeScript, JavaScript, Python, and Go
+- `codegraph_query` / `codegraph_blast_radius` — agents trace impact
+  through real call/import edges instead of grepping text
+- Self-healing — a debounced hook keeps the graph current after every
+  edit; no separate watch process to remember to run
+
+**Running it**
+- MCP server (`poneglyph serve`) — 6 memory tools + 2 codegraph tools for
+  any MCP-aware client
+- Web dashboard (`poneglyph viewer`) — GPU-rendered (WebGL) graph explorer
+  that scales past what a DOM renderer can handle, plus search, timeline,
+  and settings
+- Multilingual embeddings by default — `poneglyph init` walks you through
+  3 model choices, multilingual to English-only, with pros/cons
+- Optional LLM enrichment — summarize, extract entities/relations, score
+  importance, semantic compression; off by default, opt-in per provider
+  at build time
 
 ## Quick start
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/brilyyy/poneglyph/main/scripts/install.sh | bash
-```
-
-Installs a prebuilt binary for your platform (falling back to cloning and
-building from source if none is available), then runs `poneglyph init`.
-
-```sh
-# Start the MCP server (for your editor/agent)
-poneglyph serve
-
-# Start the web dashboard + graph viewer (separate process)
-poneglyph viewer
-open http://127.0.0.1:3742
-```
+1. **Install** — grabs a prebuilt binary for your platform (falls back to
+   building from source), then runs `poneglyph init`:
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/brilyyy/poneglyph/main/scripts/install.sh | bash
+   ```
+2. **Run the MCP server** for your editor/agent:
+   ```sh
+   poneglyph serve
+   ```
+3. **Or open the web dashboard** (separate process):
+   ```sh
+   poneglyph viewer
+   open http://127.0.0.1:3742
+   ```
 
 ### Build from source
 
@@ -75,6 +108,9 @@ open http://127.0.0.1:3742
 
 ## Architecture
 
+<details>
+<summary>Crate and directory layout</summary>
+
 ```
 poneglyph-cli       ── clap binary (init, serve, viewer, remember, recall, demo, ...)
 poneglyph-http      ── axum server (/ingest, /api/*, embedded viewer)
@@ -85,6 +121,8 @@ hooks/claude-code/  ── bash hooks (posttooluse, userpromptsubmit, stop, sess
 hooks/opencode/     ── TypeScript plugin
 hooks/poneglyph/    ── Claude Code skill (SKILL.md)
 ```
+
+</details>
 
 ## Configuration
 
