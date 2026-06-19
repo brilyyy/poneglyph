@@ -386,13 +386,21 @@ pub fn detect_local_llm() -> Detected {
 
 /// Render a full `config.toml`: every key from the schema is present, but
 /// commented (so the figment defaults layer applies) unless detection found
-/// a concrete value worth uncommenting.
-pub fn render_config_template(detected: &Detected) -> String {
+/// a concrete value worth uncommenting, or the caller picked an explicit
+/// `model_id` (e.g. from the `init`-time model picker in `models.rs`).
+pub fn render_config_template(detected: &Detected, model_id: Option<&str>) -> String {
     let llm_block = match (detected.llm_provider, detected.llm_base_url) {
         (Some(provider), Some(base_url)) => format!(
-            "enabled = true\nprovider = \"{provider}\"  # openai | anthropic | gemini | ollama | lmstudio | gpt4all\nbase_url = \"{base_url}\"\n# model = \"...\"\n# api_key = \"...\"  # prefer PONEGLYPH_LLM_API_KEY env var\ntimeout_seconds = 60\nmax_generation_tokens = 2048"
+            "enabled = true\nprovider = \"{provider}\"  # openai | anthropic | gemini | ollama | lmstudio | gpt4all  (each needs a matching --features llm-* build)\nbase_url = \"{base_url}\"\n# model = \"...\"\n# api_key = \"...\"  # prefer PONEGLYPH_LLM_API_KEY env var\ntimeout_seconds = 60\nmax_generation_tokens = 2048"
         ),
-        _ => "# enabled = false\n# provider = \"ollama\"  # openai | anthropic | gemini | ollama | lmstudio | gpt4all\n# base_url = \"http://localhost:11434/v1\"\n# model = \"...\"\n# api_key = \"...\"  # prefer PONEGLYPH_LLM_API_KEY env var\n# timeout_seconds = 60\n# max_generation_tokens = 2048".to_string(),
+        _ => "# enabled = false\n# provider = \"ollama\"  # openai | anthropic | gemini | ollama | lmstudio | gpt4all  (each needs a matching --features llm-* build)\n# base_url = \"http://localhost:11434/v1\"\n# model = \"...\"\n# api_key = \"...\"  # prefer PONEGLYPH_LLM_API_KEY env var\n# timeout_seconds = 60\n# max_generation_tokens = 2048".to_string(),
+    };
+
+    let embedding_block = match model_id {
+        Some(id) => format!(
+            "# provider = \"local\"        # local | ollama | openai\nmodel_id = \"{id}\"\n# model_path = \"...\"        # relative to data_dir, local provider only\ndimensions = 384\n# device = \"cpu\"            # cpu | cuda\n# batch_size = 32\n# query_prefix = \"\"           # prepended when embedding search queries (e5-family models want \"query: \")\n# passage_prefix = \"\"         # prepended when embedding stored text (e5-family models want \"passage: \")"
+        ),
+        None => "# provider = \"local\"        # local | ollama | openai\n# model_id = \"sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2\"  # 50+ languages\n# model_path = \"...\"        # relative to data_dir, local provider only\n# dimensions = 384           # must match the vec_memories table width\n# device = \"cpu\"            # cpu | cuda\n# batch_size = 32\n# query_prefix = \"\"           # prepended when embedding search queries (e5-family models want \"query: \")\n# passage_prefix = \"\"         # prepended when embedding stored text (e5-family models want \"passage: \")".to_string(),
     };
 
     format!(
@@ -405,14 +413,7 @@ pub fn render_config_template(detected: &Detected) -> String {
 # auto_update = true
 
 [embedding]
-# provider = "local"        # local | ollama | openai
-# model_id = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 50+ languages
-# model_path = "..."        # relative to data_dir, local provider only
-# dimensions = 384           # must match the vec_memories table width
-# device = "cpu"            # cpu | cuda
-# batch_size = 32
-# query_prefix = ""           # prepended when embedding search queries (e5-family models want "query: ")
-# passage_prefix = ""         # prepended when embedding stored text (e5-family models want "passage: ")
+{embedding_block}
 
 [llm]
 {llm_block}
@@ -444,7 +445,6 @@ pub fn render_config_template(detected: &Detected) -> String {
 
 [dashboard]
 # enabled = true
-# mcp = true
 # port = 3742
 # host = "127.0.0.1"
 # open_on_start = false
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn render_config_template_uncomments_detected_llm_provider() {
         let detected = Detected { llm_provider: Some("ollama"), llm_base_url: Some("http://localhost:11434/v1") };
-        let toml = render_config_template(&detected);
+        let toml = render_config_template(&detected, None);
         assert!(toml.contains("provider = \"ollama\""));
         assert!(toml.contains("enabled = true"));
         // Every other section stays commented.
@@ -654,10 +654,20 @@ mod tests {
     #[test]
     fn render_config_template_comments_llm_when_nothing_detected() {
         let detected = Detected { llm_provider: None, llm_base_url: None };
-        let toml = render_config_template(&detected);
+        let toml = render_config_template(&detected, None);
         assert!(toml.contains("# enabled = false"));
         assert!(!toml.contains("\nenabled = true"));
         let _: toml::Table = toml.parse().expect("fully-commented template must still be valid TOML");
+    }
+
+    #[test]
+    fn render_config_template_uncomments_picked_model() {
+        let detected = Detected { llm_provider: None, llm_base_url: None };
+        let toml = render_config_template(&detected, Some("BAAI/bge-small-en-v1.5"));
+        assert!(toml.contains("model_id = \"BAAI/bge-small-en-v1.5\""));
+        assert!(toml.contains("\ndimensions = 384"));
+        let parsed: toml::Table = toml.parse().expect("template must be valid TOML");
+        assert!(parsed.contains_key("embedding"));
     }
 
     #[test]

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="viewer/public/logo.svg" alt="poneglyph" width="120">
+</p>
+
 # poneglyph
 
 Local AI memory engine for coding agents. Remembers what your tools do so your
@@ -12,9 +16,10 @@ agent has project context across sessions.
 - **Claude Code skill + OpenCode plugin** — teaches agents when to use memory/codegraph tools instead of ad-hoc grepping; `poneglyph init --inject-rules` can also inject a condensed usage block into an existing `CLAUDE.md`/`AGENTS.md`/`.cursorrules`
 - **Self-healing code graph** — the PostToolUse hook debounce-triggers `graph update` after source edits, so `codegraph_query`/`codegraph_blast_radius` stay fresh without a separate watch process
 - **Passive capture** — Claude Code hooks + OpenCode plugin auto-capture tool executions, prompts, and assistant messages
-- **Web viewer** — dashboard, memories list/detail, search, timeline, token-savings, agent status, settings, and a GPU-rendered (WebGL) graph explorer + codegraph view that scales well past what a DOM-based renderer can handle, with a "showing X of Y" sampling indicator and render-limit slider
+- **Web viewer** — dashboard, memories list/detail, search, timeline, token-savings, agent status, settings, and a GPU-rendered (WebGL) graph explorer + codegraph view that scales well past what a DOM-based renderer can handle, with a "showing X of Y" sampling indicator and render-limit slider. Runs as its own command (`poneglyph viewer`), independent of the MCP server (`poneglyph serve`)
 - **Zero-token context injection** — session context from your project's memories, no LLM calls
-- **Optional LLM enrichment** — summarize, extract entities/relations, score importance, semantic compression (off by default)
+- **Multilingual embeddings by default** — `poneglyph init` interactively offers 3 curated 384d models spanning multilingual to English-only, with pros/cons for each
+- **Optional LLM enrichment** — summarize, extract entities/relations, score importance, semantic compression (off by default, and not compiled in unless you build with `--features llm-openai`/`llm-anthropic`/`llm-gemini`/`llm-all`)
 - **Fully offline** — after first-run model download, everything runs locally
 
 ## Quick start
@@ -27,10 +32,11 @@ Installs a prebuilt binary for your platform (falling back to cloning and
 building from source if none is available), then runs `poneglyph init`.
 
 ```sh
-# Start MCP + HTTP server
+# Start the MCP server (for your editor/agent)
 poneglyph serve
 
-# Open viewer
+# Start the web dashboard + graph viewer (separate process)
+poneglyph viewer
 open http://127.0.0.1:3742
 ```
 
@@ -41,15 +47,19 @@ git clone https://github.com/brilyyy/poneglyph.git
 cd poneglyph
 cargo build --release
 ./target/release/poneglyph init
-./target/release/poneglyph serve
+./target/release/poneglyph serve   # MCP, for editor/agent integration
 ```
+
+LLM-backed enrichment/compression is opt-in per provider and not compiled in
+by default — add `--features llm-openai`, `llm-anthropic`, `llm-gemini`, or
+the `llm-all` bundle to `cargo build` if you want it.
 
 ## Demo
 
 ```sh
 # Seed sample data and view in browser
 ./target/release/poneglyph demo
-./target/release/poneglyph serve
+./target/release/poneglyph viewer
 open http://127.0.0.1:3742
 ```
 
@@ -66,7 +76,7 @@ open http://127.0.0.1:3742
 ## Architecture
 
 ```
-poneglyph-cli       ── clap binary (init, serve, remember, recall, demo, ...)
+poneglyph-cli       ── clap binary (init, serve, viewer, remember, recall, demo, ...)
 poneglyph-http      ── axum server (/ingest, /api/*, embedded viewer)
 poneglyph-mcp       ── rmcp stdio server (8 tools: memory + codegraph)
 poneglyph-core      ── store, embed, retrieve, graph, codegraph, compress, enrich, llm, config
@@ -82,10 +92,9 @@ TOML at `~/.config/poneglyph/config.toml` (XDG). Key settings:
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `server.http_port` | `3742` | HTTP API + viewer port |
-| `server.mcp` | `true` | Enable MCP stdio server |
-| `embedding.model_id` | `BAAI/bge-small-en-v1.5` | Embedding model (384d) |
-| `llm.enabled` | `false` | Optional LLM enrichment |
+| `dashboard.port` | `3742` | `poneglyph viewer` HTTP port |
+| `embedding.model_id` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Embedding model (384d); picked interactively at `poneglyph init` |
+| `llm.enabled` | `false` | Optional LLM enrichment (also needs a matching `--features llm-*` build) |
 | `enrichment.enabled` | `false` | Enable enrichment jobs |
 
 ## License

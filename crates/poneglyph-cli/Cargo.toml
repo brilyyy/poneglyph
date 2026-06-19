@@ -10,6 +10,12 @@ path = "src/main.rs"
 [features]
 # Compile the built web viewer into the binary (see scripts/build-release.sh).
 viewer = ["poneglyph-http/embed-viewer"]
+# LLM-backed enrichment/compression is opt-in per provider — none compiled
+# in by default. `llm-all` is a convenience bundle of all three.
+llm-openai    = ["poneglyph-core/llm-openai"]
+llm-anthropic = ["poneglyph-core/llm-anthropic"]
+llm-gemini    = ["poneglyph-core/llm-gemini"]
+llm-all       = ["llm-openai", "llm-anthropic", "llm-gemini"]
 
 [dependencies]
 poneglyph-core = { workspace = true }

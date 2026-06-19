@@ -14,12 +14,15 @@
 //! thin wrapper over a match anyway.
 
 use anyhow::{Context, Result};
+#[cfg(feature = "llm-openai")]
 use async_openai::config::OpenAIConfig;
+#[cfg(feature = "llm-openai")]
 use async_openai::types::{
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     CreateChatCompletionRequestArgs,
 };
 use serde::Deserialize;
+#[cfg(any(feature = "llm-anthropic", feature = "llm-gemini"))]
 use serde_json::json;
 use tracing::debug;
 
@@ -34,23 +37,33 @@ pub(crate) const SUMMARIZE_MIN_CHARS: usize = 280;
 /// Neighbour candidates offered to the relation extractor.
 const RELATION_CANDIDATES: usize = 5;
 
+#[cfg(feature = "llm-anthropic")]
 const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+#[cfg(feature = "llm-anthropic")]
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+#[cfg(feature = "llm-anthropic")]
 const ANTHROPIC_DEFAULT_MODEL: &str = "claude-opus-4-8";
 
+#[cfg(feature = "llm-gemini")]
 const GEMINI_DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
+#[cfg(feature = "llm-openai")]
 const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
+#[cfg(feature = "llm-openai")]
 const LMSTUDIO_DEFAULT_BASE_URL: &str = "http://localhost:1234/v1";
+#[cfg(feature = "llm-openai")]
 const GPT4ALL_DEFAULT_BASE_URL: &str = "http://localhost:4891/v1";
+#[cfg(feature = "llm-openai")]
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 enum Backend {
     /// OpenAI and OpenAI-compatible servers (Ollama, LM Studio, GPT4All).
+    #[cfg(feature = "llm-openai")]
     OpenAiCompat {
         client: async_openai::Client<OpenAIConfig>,
         model: String,
     },
+    #[cfg(feature = "llm-anthropic")]
     Anthropic {
         http: reqwest::Client,
         base_url: String,
@@ -58,6 +71,7 @@ enum Backend {
         model: String,
         max_tokens: u32,
     },
+    #[cfg(feature = "llm-gemini")]
     Gemini {
         http: reqwest::Client,
         base_url: String,
@@ -83,32 +97,39 @@ impl LlmClient {
             return None;
         }
 
-        let backend = match cfg.provider.as_str() {
+        match cfg.provider.as_str() {
+            #[cfg(feature = "llm-anthropic")]
             "anthropic" => {
                 let api_key = cfg.api_key.as_deref()?.trim();
                 if api_key.is_empty() {
                     return None;
                 }
-                Backend::Anthropic {
-                    http: reqwest::Client::new(),
-                    base_url: non_empty(&cfg.base_url).unwrap_or(ANTHROPIC_DEFAULT_BASE_URL).to_string(),
-                    api_key: api_key.to_string(),
-                    model: non_empty_owned(model, ANTHROPIC_DEFAULT_MODEL),
-                    max_tokens: cfg.max_generation_tokens,
-                }
+                Some(Self {
+                    backend: Backend::Anthropic {
+                        http: reqwest::Client::new(),
+                        base_url: non_empty(&cfg.base_url).unwrap_or(ANTHROPIC_DEFAULT_BASE_URL).to_string(),
+                        api_key: api_key.to_string(),
+                        model: non_empty_owned(model, ANTHROPIC_DEFAULT_MODEL),
+                        max_tokens: cfg.max_generation_tokens,
+                    },
+                })
             }
+            #[cfg(feature = "llm-gemini")]
             "gemini" => {
                 let api_key = cfg.api_key.as_deref()?.trim();
                 if api_key.is_empty() {
                     return None;
                 }
-                Backend::Gemini {
-                    http: reqwest::Client::new(),
-                    base_url: non_empty(&cfg.base_url).unwrap_or(GEMINI_DEFAULT_BASE_URL).to_string(),
-                    api_key: api_key.to_string(),
-                    model: model.to_string(),
-                }
+                Some(Self {
+                    backend: Backend::Gemini {
+                        http: reqwest::Client::new(),
+                        base_url: non_empty(&cfg.base_url).unwrap_or(GEMINI_DEFAULT_BASE_URL).to_string(),
+                        api_key: api_key.to_string(),
+                        model: model.to_string(),
+                    },
+                })
             }
+            #[cfg(feature = "llm-openai")]
             provider => {
                 let default_base = match provider {
                     "ollama" => OLLAMA_DEFAULT_BASE_URL,
@@ -120,26 +141,48 @@ impl LlmClient {
                 let oai = OpenAIConfig::new()
                     .with_api_base(endpoint)
                     .with_api_key(cfg.api_key.clone().unwrap_or_default());
-                Backend::OpenAiCompat {
-                    client: async_openai::Client::with_config(oai),
-                    model: model.to_string(),
-                }
+                Some(Self {
+                    backend: Backend::OpenAiCompat {
+                        client: async_openai::Client::with_config(oai),
+                        model: model.to_string(),
+                    },
+                })
             }
-        };
-
-        Some(Self { backend })
+            // Reachable only when the matched provider's feature isn't
+            // compiled in (e.g. provider = "anthropic" without
+            // --features llm-anthropic) — degrade gracefully rather than
+            // failing to build a client that callers already treat as
+            // optional.
+            #[allow(unreachable_patterns)]
+            provider => {
+                tracing::warn!(
+                    provider,
+                    "LLM provider not available in this build — rebuild with --features llm-openai/llm-anthropic/llm-gemini"
+                );
+                None
+            }
+        }
     }
 
     /// One chat completion. No internal retries — the job layer retries.
     pub async fn complete(&self, system: &str, user: &str) -> Result<String> {
         match &self.backend {
+            #[cfg(feature = "llm-openai")]
             Backend::OpenAiCompat { client, model } => complete_openai_compat(client, model, system, user).await,
+            #[cfg(feature = "llm-anthropic")]
             Backend::Anthropic { http, base_url, api_key, model, max_tokens } => {
                 complete_anthropic(http, base_url, api_key, model, *max_tokens, system, user).await
             }
+            #[cfg(feature = "llm-gemini")]
             Backend::Gemini { http, base_url, api_key, model } => {
                 complete_gemini(http, base_url, api_key, model, system, user).await
             }
+            // `&Backend` is always considered inhabited by exhaustiveness
+            // checking even when `Backend` itself has zero variants (no
+            // llm-* feature enabled) — unreachable in practice since
+            // `from_config` can never construct a `Backend` in that build.
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("Backend has no variants without an llm-* feature enabled"),
         }
     }
 }
@@ -148,10 +191,12 @@ fn non_empty(s: &Option<String>) -> Option<&str> {
     s.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
+#[cfg(feature = "llm-anthropic")]
 fn non_empty_owned(s: &str, default: &str) -> String {
     if s.is_empty() { default.to_string() } else { s.to_string() }
 }
 
+#[cfg(feature = "llm-openai")]
 async fn complete_openai_compat(
     client: &async_openai::Client<OpenAIConfig>,
     model: &str,
@@ -182,17 +227,20 @@ async fn complete_openai_compat(
         .context("LLM reply had no content")
 }
 
+#[cfg(feature = "llm-anthropic")]
 #[derive(Deserialize)]
 struct AnthropicResponse {
     content: Vec<AnthropicBlock>,
 }
 
+#[cfg(feature = "llm-anthropic")]
 #[derive(Deserialize)]
 struct AnthropicBlock {
     #[serde(default)]
     text: Option<String>,
 }
 
+#[cfg(feature = "llm-anthropic")]
 async fn complete_anthropic(
     http: &reqwest::Client,
     base_url: &str,
@@ -234,27 +282,32 @@ async fn complete_anthropic(
         .context("Anthropic reply had no text content")
 }
 
+#[cfg(feature = "llm-gemini")]
 #[derive(Deserialize)]
 struct GeminiResponse {
     candidates: Vec<GeminiCandidate>,
 }
 
+#[cfg(feature = "llm-gemini")]
 #[derive(Deserialize)]
 struct GeminiCandidate {
     content: GeminiContent,
 }
 
+#[cfg(feature = "llm-gemini")]
 #[derive(Deserialize)]
 struct GeminiContent {
     parts: Vec<GeminiPart>,
 }
 
+#[cfg(feature = "llm-gemini")]
 #[derive(Deserialize)]
 struct GeminiPart {
     #[serde(default)]
     text: Option<String>,
 }
 
+#[cfg(feature = "llm-gemini")]
 async fn complete_gemini(
     http: &reqwest::Client,
     base_url: &str,
@@ -487,24 +540,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_config_none_unless_fully_configured() {
+    fn from_config_none_unless_enabled_with_a_model() {
         // All defaults (disabled) → None (PRD §8.11 AC1).
         assert!(LlmClient::from_config(&LlmConfig::default()).is_none());
 
         // Enabled but no model → None.
         let cfg = LlmConfig { enabled: true, ..Default::default() };
         assert!(LlmClient::from_config(&cfg).is_none());
+    }
 
-        // OpenAI-compat (ollama default provider): model set → Some, even
-        // without an explicit base_url (falls back to provider default).
+    #[test]
+    #[cfg(feature = "llm-openai")]
+    fn from_config_openai_compat_needs_only_a_model() {
+        // ollama default provider: model set → Some, even without an
+        // explicit base_url (falls back to the provider default).
         let cfg = LlmConfig {
             enabled: true,
             model: Some("llama3.2".into()),
             ..Default::default()
         };
         assert!(LlmClient::from_config(&cfg).is_some());
+    }
 
-        // Anthropic: needs an api_key too.
+    #[test]
+    #[cfg(feature = "llm-anthropic")]
+    fn from_config_anthropic_needs_api_key() {
         let cfg = LlmConfig {
             enabled: true,
             provider: "anthropic".into(),
@@ -521,8 +581,11 @@ mod tests {
             ..Default::default()
         };
         assert!(LlmClient::from_config(&cfg).is_some());
+    }
 
-        // Gemini: same shape as Anthropic — needs api_key.
+    #[test]
+    #[cfg(feature = "llm-gemini")]
+    fn from_config_gemini_needs_api_key() {
         let cfg = LlmConfig {
             enabled: true,
             provider: "gemini".into(),
@@ -531,6 +594,23 @@ mod tests {
             ..Default::default()
         };
         assert!(LlmClient::from_config(&cfg).is_some());
+    }
+
+    #[test]
+    #[cfg(not(any(feature = "llm-openai", feature = "llm-anthropic", feature = "llm-gemini")))]
+    fn from_config_none_when_no_provider_feature_compiled_in() {
+        // A fully-configured provider still degrades to None when this
+        // binary wasn't built with that provider's feature — never a panic
+        // or a build error, matching the existing "missing embedder"
+        // degrade-gracefully shape.
+        let cfg = LlmConfig {
+            enabled: true,
+            provider: "anthropic".into(),
+            model: Some("claude-opus-4-8".into()),
+            api_key: Some("sk-ant-test".into()),
+            ..Default::default()
+        };
+        assert!(LlmClient::from_config(&cfg).is_none());
     }
 
     #[test]

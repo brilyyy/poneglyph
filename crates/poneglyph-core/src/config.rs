@@ -258,8 +258,6 @@ impl Default for CodeGraphConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardConfig {
     pub enabled: bool,
-    /// Run the MCP stdio server alongside the dashboard (was server.mcp).
-    pub mcp: bool,
     #[serde(alias = "http_port")]
     pub port: u16,
     #[serde(alias = "bind_addr")]
@@ -277,7 +275,6 @@ impl Default for DashboardConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            mcp: true,
             port: 3742,
             host: "127.0.0.1".to_string(),
             open_on_start: false,
@@ -781,7 +778,6 @@ mod tests {
         assert_eq!(cfg.embedding.provider, "local");
         assert_eq!(cfg.dashboard.port, 3742);
         assert_eq!(cfg.dashboard.host, "127.0.0.1");
-        assert!(cfg.dashboard.mcp);
         assert!(!cfg.llm.enabled);
         assert_eq!(cfg.memory.edges.similarity_threshold, 0.82);
         assert_eq!(cfg.memory.edges.temporal_window_secs, 300);
@@ -866,11 +862,13 @@ mod tests {
             mcp = false
             "#,
         );
+        // The legacy `mcp = false` key has no home in the current schema
+        // (poneglyph serve / poneglyph viewer are separate commands now) —
+        // confirm it's silently ignored rather than rejected.
         let cfg = Config::load_from(file.path()).unwrap();
         assert_eq!(cfg.dashboard.port, 8080);
         assert_eq!(cfg.dashboard.host, "0.0.0.0");
         assert_eq!(cfg.dashboard.token.as_deref(), Some("tok"));
-        assert!(!cfg.dashboard.mcp);
     }
 
     #[test]

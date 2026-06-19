@@ -75,8 +75,8 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Bind the configured address. Split from [`serve_on`] so the caller can
-/// decide what a bind failure means (e.g. degrade to MCP-only on AddrInUse).
+/// Bind the configured address. Split from [`serve_on`] so the caller
+/// controls error handling around the bind step.
 pub async fn bind(config: &Config) -> std::io::Result<tokio::net::TcpListener> {
     let addr = format!("{}:{}", config.dashboard.host, config.dashboard.port);
     tokio::net::TcpListener::bind(&addr).await

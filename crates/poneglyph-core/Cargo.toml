@@ -8,7 +8,7 @@ tokio           = { workspace = true }
 embed_anything  = { workspace = true }
 rusqlite        = { workspace = true }
 sqlite-vec      = { workspace = true }
-async-openai    = { workspace = true }
+async-openai    = { workspace = true, optional = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 anyhow          = { workspace = true }
@@ -37,3 +37,13 @@ rayon                  = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 axum     = { workspace = true }
+
+[features]
+# LLM-backed enrichment/compression is opt-in per provider — none compiled
+# in by default. Compression itself has no provider-specific code (it's
+# always one LlmClient::complete call); these gate the three Backend
+# implementations in llm.rs.
+llm-openai    = ["dep:async-openai"]
+llm-anthropic = []
+llm-gemini    = []
+llm-all       = ["llm-openai", "llm-anthropic", "llm-gemini"]

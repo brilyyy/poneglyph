@@ -1,5 +1,6 @@
 mod demo;
 mod detect;
+mod models;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -36,8 +37,10 @@ enum Command {
         #[arg(long)]
         inject_rules: bool,
     },
-    /// Start MCP + HTTP servers
+    /// Start the MCP server (stdio) — for editor/agent integration
     Serve,
+    /// Start the web dashboard + graph viewer (HTTP) — for browsing in person
+    Viewer,
     /// Store a memory
     Remember {
         content: String,
@@ -65,7 +68,7 @@ enum Command {
         #[arg(long, default_value = "json")]
         format: String,
     },
-    /// Seed sample data into a database (no server; run `poneglyph serve` to view)
+    /// Seed sample data into a database (no server; run `poneglyph viewer` to view)
     Demo {
         /// Number of memories to seed
         #[arg(long, default_value = "60")]
@@ -151,6 +154,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Init { inject_rules } => cmd_init(&config, inject_rules),
         Command::Serve => cmd_serve(&config).await,
+        Command::Viewer => cmd_viewer(&config).await,
         Command::Remember { content, r#type, importance, project, tag } => {
             cmd_remember(&config, &content, &r#type, importance, project.as_deref(), &tag).await
         }
@@ -178,7 +182,8 @@ fn cmd_init(config: &Config, inject_rules: bool) -> Result<()> {
             std::fs::create_dir_all(dir).context("failed to create config directory")?;
         }
         let detected = detect::detect_local_llm();
-        let toml = detect::render_config_template(&detected);
+        let model_id = models::pick_model();
+        let toml = detect::render_config_template(&detected, Some(model_id));
         std::fs::write(&config_path, toml).context("failed to write config")?;
         println!("Config created: {}", config_path.display());
     } else {
@@ -224,10 +229,19 @@ async fn try_embedder(config: &Config) -> Option<Arc<Embedder>> {
     }
 }
 
-async fn cmd_serve(config: &Config) -> Result<()> {
+/// Open the store + embedder and spawn the background enrich worker — the
+/// setup shared by `serve` (MCP) and `viewer` (HTTP), each otherwise
+/// running standalone in its own process.
+async fn open_store_and_worker(
+    config: &Config,
+) -> Result<(
+    Arc<Mutex<Store>>,
+    Option<Arc<Embedder>>,
+    Arc<Config>,
+    poneglyph_core::enrich::EnrichHandle,
+    tokio::task::JoinHandle<()>,
+)> {
     config.ensure_dirs()?;
-    poneglyph_http::validate_security(config)?;
-
     let store = Store::open(&config.db_path).context("failed to open database")?;
     let store = Arc::new(Mutex::new(store));
     let embedder = try_embedder(config).await;
@@ -246,52 +260,43 @@ async fn cmd_serve(config: &Config) -> Result<()> {
         },
     );
 
-    // Bind HTTP up front so AddrInUse can degrade instead of killing MCP:
-    // a second editor spawning `poneglyph serve` shares the other instance's
-    // HTTP server (same DB) and runs MCP-only here.
-    let listener = match poneglyph_http::bind(config).await {
-        Ok(l) => Some(l),
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && config.dashboard.mcp => {
-            tracing::warn!(
-                port = config.dashboard.port,
-                "HTTP port busy — another poneglyph instance is serving HTTP; continuing MCP-only"
-            );
-            None
-        }
-        Err(e) => return Err(e).context("failed to bind HTTP server"),
-    };
+    Ok((store, embedder, shared_config, enrich, worker))
+}
 
-    let http_state = poneglyph_http::AppState {
-        store: Arc::clone(&store),
-        embedder: embedder.clone(),
-        config: Arc::clone(&shared_config),
-        enrich: Some(enrich.clone()),
-    };
-    let http = async move {
-        match listener {
-            Some(l) => poneglyph_http::serve_on(l, http_state).await,
-            None => std::future::pending().await,
-        }
-    };
+/// MCP stdio server only — for editor/agent integration. `poneglyph viewer`
+/// runs the HTTP dashboard as a separate, independent process.
+async fn cmd_serve(config: &Config) -> Result<()> {
+    let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
 
     // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
-    let result = if config.dashboard.mcp {
-        let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store, embedder, shared_config)
-            .with_enrich(enrich);
-        tokio::select! {
-            // MCP client disconnect owns the process lifetime.
-            r = poneglyph_mcp::server::run_stdio(mcp) => r,
-            r = http => r,
-        }
-    } else {
-        // HTTP-only daemon mode (server.mcp = false): run until Ctrl-C.
-        tokio::select! {
-            r = http => r,
-            _ = tokio::signal::ctrl_c() => Ok(()),
-        }
+    let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store, embedder, shared_config).with_enrich(enrich);
+    let result = poneglyph_mcp::server::run_stdio(mcp).await;
+
+    worker.abort(); // client gone; no more producers
+    result
+}
+
+/// HTTP dashboard + graph viewer only — for browsing in a browser.
+/// `poneglyph serve` runs the MCP server as a separate, independent process.
+async fn cmd_viewer(config: &Config) -> Result<()> {
+    poneglyph_http::validate_security(config)?;
+    let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
+
+    let listener = poneglyph_http::bind(config).await.context("failed to bind HTTP server")?;
+    let http_state = poneglyph_http::AppState {
+        store,
+        embedder,
+        config: shared_config,
+        enrich: Some(enrich),
     };
 
-    worker.abort(); // clients gone; no more producers
+    println!("Viewer listening on http://{}:{}", config.dashboard.host, config.dashboard.port);
+    let result = tokio::select! {
+        r = poneglyph_http::serve_on(listener, http_state) => r,
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    };
+
+    worker.abort(); // client gone; no more producers
     result
 }
 
@@ -339,7 +344,7 @@ async fn cmd_demo(config: &Config, count: usize, db: Option<PathBuf>, force: boo
     );
 
     if is_default_db {
-        println!("Run `poneglyph serve` to view the data.");
+        println!("Run `poneglyph viewer` to view the data.");
     }
 
     Ok(())

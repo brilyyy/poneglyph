@@ -32,14 +32,25 @@ cargo build --release
 
 Binary: `target/release/poneglyph`
 
+LLM-backed enrichment/compression is opt-in per provider and not compiled in
+by default (keeps the default binary smaller and dependency-free of
+`async-openai`/provider SDKs). Add features to pull a provider in:
+
+```sh
+cargo build --release --features llm-anthropic   # or llm-openai, llm-gemini, llm-all
+```
+
 ## First run
 
 ```sh
-# Create database + default config
+# Create database + default config (interactively picks an embedding model)
 poneglyph init
 
-# Start MCP + HTTP server
+# Start the MCP server (for your editor/agent)
 poneglyph serve
+
+# Start the web dashboard + graph viewer (separate process)
+poneglyph viewer
 ```
 
 `poneglyph init` creates:
@@ -49,20 +60,19 @@ poneglyph serve
 
 ## Model download
 
-On first `recall`, `remember`, or `serve`, the embedding model
-(`BAAI/bge-small-en-v1.5`, ~30MB) downloads to `~/.cache/poneglyph/models/`.
-After this, everything runs **fully offline**.
+On first `recall`, `remember`, `serve`, or `viewer`, the embedding model
+picked at `poneglyph init` (default
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`) downloads to
+`~/.cache/poneglyph/models/`. After this, everything runs **fully offline**.
 
 ## Verify
 
 ```sh
-# Check server health
+# poneglyph viewer must be running for these two
 curl http://127.0.0.1:3742/healthz
-
-# Open viewer
 open http://127.0.0.1:3742
 
-# Store and recall a memory
+# Store and recall a memory (works standalone, no server needed)
 poneglyph remember "Postgres connection pool capped at 20 in production"
 poneglyph recall "postgres pool" --limit 3
 ```
@@ -72,13 +82,12 @@ poneglyph recall "postgres pool" --limit 3
 Edit `~/.config/poneglyph/config.toml`:
 
 ```toml
-[server]
-http_port = 3742
-bind_addr = "127.0.0.1"
-mcp = true
+[dashboard]
+port = 3742
+host = "127.0.0.1"
 
 [embedding]
-model_id = "BAAI/bge-small-en-v1.5"
+model_id = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 dimensions = 384
 
 [llm]
@@ -99,11 +108,16 @@ exclude_patterns = ["**/target/**", "**/node_modules/**", "**/.git/**", "**/*.te
 blast_radius_depth = 5
 ```
 
+`[llm]` (and therefore `compression_mode = "semantic"`) needs a binary built
+with a matching provider feature — see [Build from source](#build-from-source)
+above. With none compiled in, semantic compression degrades to the caveman
+fallback automatically; it never blocks `remember`.
+
 See [COMPRESSION.md](COMPRESSION.md) for `[memory]` compression detail and
 [CODEGRAPH.md](CODEGRAPH.md) for `[graph]` and `.poneglyphignore`.
 
 Environment variables override config (prefix `PONEGLYPH_`):
-- `PONEGLYPH_PORT` — HTTP port
+- `PONEGLYPH_PORT` — HTTP port (`poneglyph viewer`)
 - `PONEGLYPH_TOKEN` — API bearer token (required if non-loopback bind)
 - `PONEGLYPH_CONTEXT_TOKENS` — SessionStart context budget (default 600)
 
@@ -112,7 +126,8 @@ Environment variables override config (prefix `PONEGLYPH_`):
 | Command | Purpose |
 |---|---|
 | `poneglyph init` | Create db + default config |
-| `poneglyph serve` | Start MCP + HTTP servers |
+| `poneglyph serve` | Start the MCP server (stdio) — editor/agent integration |
+| `poneglyph viewer` | Start the web dashboard + graph viewer (HTTP), separate process |
 | `poneglyph remember "<text>"` | Store a memory |
 | `poneglyph recall "<query>"` | Search memories |
 | `poneglyph forget <id>` | Delete a memory |

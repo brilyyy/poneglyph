@@ -3,6 +3,10 @@
 //! A tiny axum mock stands in for the OpenAI-compatible endpoint, so these
 //! exercise the real async-openai wire path with zero network dependency.
 //! Failure injection points the client at an unbound port.
+//!
+//! Requires `--features llm-openai` — the OpenAI-compatible backend these
+//! tests exercise isn't compiled in otherwise (off by default).
+#![cfg(feature = "llm-openai")]
 
 use std::sync::Arc;
 

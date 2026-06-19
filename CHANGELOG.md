@@ -2,6 +2,36 @@
 
 Notable changes on `refactor/unified-v2`. Earlier history: `git log`.
 
+## Phase G — Model picker, opt-in LLM provider features, serve/viewer split
+
+- `poneglyph init` interactively offers 3 curated 384d embedding models
+  (multilingual MiniLM, English `bge-small`, English `all-MiniLM-L6-v2`)
+  with pros/cons, instead of always defaulting to one. Falls straight
+  through to the first model on non-TTY stdin (CI/scripts stay
+  script-safe). A 384d-vs-768d build-time tier was scoped out for now — the
+  `vec_memories` sqlite-vec width can't change after the fact, so doing
+  that properly needs a Cargo feature, a `format!`-built schema DDL, and a
+  stored-dimension compatibility check; not worth it for a second tier
+  nobody's asked for yet. (Researched in passing: `embed_anything` already
+  has an `ort` ONNX-runtime feature that loads any HF repo's `model.onnx`
+  generically, unlike the candle backend's fixed architecture-string match
+  — the path to true e5/BGE-M3-class multilingual models later, if wanted,
+  without replacing `embed_anything`.)
+- LLM-backed enrichment/compression is now opt-in per provider —
+  `llm-openai`/`llm-anthropic`/`llm-gemini`/`llm-all` Cargo features, all
+  off by default (was: all three always compiled in, gated only by runtime
+  config). Compression itself has no provider-specific code — it's always
+  one `LlmClient::complete` call — so this gates the three `Backend`
+  implementations directly; a provider configured without its feature
+  compiled in degrades gracefully (caveman fallback, clear warning) rather
+  than failing to build.
+- `poneglyph serve` is now MCP-only (stdio); the HTTP dashboard + graph
+  viewer moved to a new standalone `poneglyph viewer` command. They're
+  independent processes against the same database — no more shared-process
+  `dashboard.mcp` toggle (removed) or "HTTP port busy, falling back to
+  MCP-only" degradation. Passive-capture hooks (`posttooluse.sh` etc.) POST
+  to `/ingest`, so they now need `poneglyph viewer` running, not `serve`.
+
 ## Phase F — Multilingual embeddings, graph-first guidance, tree-sitter registry
 
 - Default embedding model swapped from `BAAI/bge-small-en-v1.5` (English-only)

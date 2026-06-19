@@ -57,9 +57,12 @@ The `schema_meta` table stores a `schema_version` row. The binary checks this on
 
 ### Embedding dimensions
 
-v1 hardcodes **384 dimensions** (matching `BAAI/bge-small-en-v1.5`). Changing the embedding model to a different dimensionality requires a full re-embed migration. This is not supported automatically — you would need to:
+v1 hardcodes **384 dimensions**. `poneglyph init` offers a choice of 384d
+models (see [INSTALL.md](INSTALL.md)), but switching to a model of a
+*different* dimensionality requires a full re-embed migration — not
+supported automatically. You would need to:
 
-1. Stop `poneglyph serve`
+1. Stop `poneglyph serve` and `poneglyph viewer` (both touch the same DB)
 2. Delete the `vec_memories` table
 3. Update `embedding.model_id` in config
 4. Run a re-embed script (not yet provided)

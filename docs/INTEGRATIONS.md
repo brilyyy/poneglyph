@@ -8,6 +8,12 @@ hooks and MCP tools.
 Hooks auto-capture tool executions, user prompts, and assistant messages as
 passive memories. Session context is injected on new sessions.
 
+Hooks POST to the `/ingest` HTTP endpoint, so they need **`poneglyph
+viewer`** running in the background (not `poneglyph serve`, which is
+MCP-only). If you also want MCP tools (`remember`/`recall`/`codegraph_query`)
+in Claude Code, run `poneglyph serve` as well — they're independent
+processes against the same database.
+
 ### Install hooks
 
 ```sh
@@ -94,8 +100,8 @@ Control the budget with `PONEGLYPH_CONTEXT_TOKENS` (default 600).
 ### Verify
 
 ```sh
-# Start poneglyph
-poneglyph serve
+# Start the viewer (hooks POST captures here)
+poneglyph viewer &
 
 # Use Claude Code in a project — tool calls are captured automatically
 
@@ -171,13 +177,13 @@ Same as Claude Code: `PONEGLYPH_PORT` (default 3742), `PONEGLYPH_TOKEN` if
 
 | Variable | Default | Used by | Purpose |
 |---|---|---|---|
-| `PONEGLYPH_PORT` | `3742` | All hooks | HTTP port of `poneglyph serve` |
+| `PONEGLYPH_PORT` | `3742` | All hooks | HTTP port of `poneglyph viewer` |
 | `PONEGLYPH_TOKEN` | unset | All hooks | Bearer token for non-loopback |
 | `PONEGLYPH_CONTEXT_TOKENS` | `600` | sessionstart.sh | Context injection token budget |
 
 ## Security notes
 
-- Hooks always exit 0 — a dead poneglyph server never blocks your agent
+- Hooks always exit 0 — a dead `poneglyph viewer` never blocks your agent
 - 2-second curl/fetch timeout on all hook requests
 - Content truncated to 4000 chars before POSTing
 - The HTTP server binds to `127.0.0.1` by default
