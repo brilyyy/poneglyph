@@ -1,6 +1,6 @@
 {
   "name": "poneglyph",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Local-first AI memory engine + code intelligence — single binary, any LLM.",
   "license": "MIT",
   "repository": {

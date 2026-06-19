@@ -6,16 +6,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# Stub out the network call and the poneglyph binary so this runs offline.
-cat > "$TMP/curl" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
+# Stub out the poneglyph binary so this runs offline.
 cat > "$TMP/poneglyph" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$TMP/calls.log"
 EOF
-chmod +x "$TMP/curl" "$TMP/poneglyph"
+chmod +x "$TMP/poneglyph"
 export PATH="$TMP:$PATH"
 export TMPDIR="$TMP"
 

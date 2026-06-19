@@ -2,6 +2,34 @@
 
 Notable changes on `refactor/unified-v2`. Earlier history: `git log`.
 
+## v1.0.0 — Claude Code focus, MCP hooks, error handling
+
+- **Claude Code only by default.** Other agent integrations (Cursor, Gemini,
+  OpenCode, Codex, Copilot) are feature-gated behind `--features cursor`,
+  `gemini`, `opencode`, `codex`, `copilot`, or `all-agents`. They compile
+  out entirely in the default build. This cuts compile time and binary size
+  for the 90% case.
+- **Hooks switched from HTTP to CLI.** Claude Code hooks now call
+  `poneglyph remember` / `poneglyph context` directly instead of curling
+  `/ingest`. No HTTP server needed for passive capture — just `poneglyph`
+  on PATH. The `PONEGLYPH_PORT` and `PONEGLYPH_TOKEN` env vars are no
+  longer used by hooks.
+- **New `poneglyph context` CLI subcommand.** Returns ranked project memory
+  for session injection, same as the `/api/context` HTTP endpoint but
+  callable from hooks without a running server.
+- **`poneglyph-http` is now optional.** The `viewer` feature (default off
+  for `cargo install`) gates the HTTP dashboard. `poneglyph viewer` prints
+  a clear message when the feature is absent.
+- **Error handling overhaul.** CLI errors are categorized (user/environment/
+  internal) with distinct exit codes (1 for user/env, 2 for internal).
+  Internal errors show full cause chains only with `RUST_LOG=debug`.
+  MCP errors use `invalid_params` for user mistakes vs `internal_error`
+  for bugs.
+- **Agent defaults changed.** Only `claude_code` is enabled by default in
+  `[agents]` config. Other agents default to `false`.
+- **Hooks no longer need jq for payload construction.** Simplified scripts
+  that call `poneglyph remember` directly.
+
 ## Phase G — Model picker, opt-in LLM provider features, serve/viewer split
 
 - `poneglyph init` interactively offers 3 curated 384d embedding models

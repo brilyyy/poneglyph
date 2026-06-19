@@ -304,11 +304,11 @@ impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             claude_code: true,
-            cursor: true,
-            gemini_cli: true,
-            opencode: true,
-            codex: true,
-            copilot_cli: true,
+            cursor: false,
+            gemini_cli: false,
+            opencode: false,
+            codex: false,
+            copilot_cli: false,
             mcp_server_port: 37778,
         }
     }

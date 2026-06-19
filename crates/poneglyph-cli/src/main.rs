@@ -33,6 +33,7 @@ enum Command {
     /// Start the MCP server (stdio) — for editor/agent integration
     Mcp,
     /// Start the web dashboard + graph viewer (HTTP) — for browsing in person
+    #[cfg(feature = "viewer")]
     Viewer,
     /// Store a memory
     Remember {
@@ -60,6 +61,15 @@ enum Command {
     Export {
         #[arg(long, default_value = "json")]
         format: String,
+    },
+    /// Get ranked project context (for hooks / session injection)
+    Context {
+        /// Project path
+        #[arg(long)]
+        project: String,
+        /// Token budget
+        #[arg(long, default_value = "600")]
+        max_tokens: usize,
     },
     /// Seed sample data into a database (no server; run `poneglyph viewer` to view)
     Demo {
@@ -139,19 +149,51 @@ fn load_config(cli_config: &Option<PathBuf>) -> Result<Config> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     // Log to stderr: `poneglyph mcp` speaks MCP JSON-RPC on stdout.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(EnvFilter::from_default_env().add_directive("poneglyph=info".parse()?))
+        .with_env_filter(
+            EnvFilter::from_default_env().add_directive("poneglyph=info".parse().unwrap()),
+        )
         .init();
 
     let cli = Cli::parse();
-    let config = load_config(&cli.config)?;
 
-    match cli.command {
+    let config = match load_config(&cli.config) {
+        Ok(c) => c,
+        Err(e) => {
+            let err: poneglyph_core::error::PoneglyphError = e.into();
+            eprintln!("error: {err}");
+            std::process::exit(err.exit_code());
+        }
+    };
+
+    let result = run(cli.command, &config).await;
+    if let Err(e) = result {
+        let err: poneglyph_core::error::PoneglyphError = e.into();
+        match err.kind {
+            poneglyph_core::error::ErrorKind::Internal => {
+                eprintln!("error: {err}");
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    if let Some(source) = &err.source {
+                        eprintln!("  caused by: {source:#}");
+                    }
+                }
+            }
+            _ => {
+                eprintln!("error: {err}");
+            }
+        }
+        std::process::exit(err.exit_code());
+    }
+}
+
+async fn run(command: Command, config: &Config) -> Result<()> {
+    match command {
         Command::Init => cmd_init(&config),
         Command::Mcp => cmd_mcp(&config).await,
+        #[cfg(feature = "viewer")]
         Command::Viewer => cmd_viewer(&config).await,
         Command::Remember { content, r#type, importance, project, tag } => {
             cmd_remember(&config, &content, &r#type, importance, project.as_deref(), &tag).await
@@ -160,6 +202,7 @@ async fn main() -> Result<()> {
         Command::Forget { id } => cmd_forget(&config, &id),
         Command::Demo { count, db, force } => cmd_demo(&config, count, db, force).await,
         Command::Export { format } => cmd_export(&config, &format),
+        Command::Context { project, max_tokens } => cmd_context(&config, &project, max_tokens).await,
         Command::Consolidate { project } => cmd_consolidate(&config, project.as_deref()).await,
         Command::Decay => cmd_decay(&config),
         Command::Status => cmd_status(&config),
@@ -218,7 +261,7 @@ fn cmd_init(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_wire(config: &Config, ide: &str) -> Result<()> {
+fn cmd_wire(_config: &Config, ide: &str) -> Result<()> {
     let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "poneglyph".to_string());
     let hooks_dir = Config::config_dir().join("hooks");
 
@@ -305,6 +348,7 @@ async fn cmd_mcp(config: &Config) -> Result<()> {
 
 /// HTTP dashboard + graph viewer only — for browsing in a browser.
 /// `poneglyph mcp` runs the MCP server as a separate, independent process.
+#[cfg(feature = "viewer")]
 async fn cmd_viewer(config: &Config) -> Result<()> {
     poneglyph_http::validate_security(config)?;
     let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
@@ -506,6 +550,26 @@ fn cmd_export(config: &Config, format: &str) -> Result<()> {
             }
         }
         _ => println!("Unknown format: {format} (use json or md)"),
+    }
+
+    Ok(())
+}
+
+async fn cmd_context(config: &Config, project: &str, max_tokens: usize) -> Result<()> {
+    config.ensure_dirs()?;
+    let store = Store::open(&config.db_path)?;
+
+    let (context, _memory_count) =
+        poneglyph_core::project::get_project_context(&store, project, max_tokens)?;
+
+    if !context.is_empty() {
+        print!("{context}");
+    }
+
+    // Nudge toward graph init if the code graph is empty.
+    let stats = store.stats()?;
+    if stats.edge_count == 0 {
+        eprintln!("poneglyph: code graph is empty — run `poneglyph graph init` to enable codegraph_query/codegraph_blast_radius.");
     }
 
     Ok(())

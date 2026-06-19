@@ -11,10 +11,11 @@
   <img src="https://img.shields.io/badge/rust-%23000000.svg?logo=rust&logoColor=white" alt="Built with Rust">
 </p>
 
-poneglyph gives Claude Code, Cursor, OpenCode, Codex, and Copilot CLI a
-memory that survives between sessions, plus a code knowledge graph they can
-query instead of grepping. One binary, SQLite, local embedding model —
-everything offline unless you opt into LLM enrichment.
+poneglyph gives Claude Code a memory that survives between sessions, plus a
+code knowledge graph it can query instead of grepping. One binary, SQLite,
+local embedding model — everything offline unless you opt into LLM
+enrichment. Other agents (Cursor, OpenCode, Codex, Copilot) are supported
+via opt-in Cargo features and will return as first-class integrations.
 
 ## Why "poneglyph"?
 

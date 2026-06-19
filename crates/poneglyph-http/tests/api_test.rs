@@ -707,8 +707,11 @@ async fn agents_status_reports_config_flags_for_every_agent() {
 
     let (status, body) = send(router, get("/api/agents-status")).await;
     assert_eq!(status, StatusCode::OK);
-    for agent in ["claude_code", "cursor", "gemini_cli", "opencode", "codex", "copilot_cli"] {
-        assert_eq!(body[agent]["enabled"], true, "{agent} should be enabled by default config");
+    // claude_code enabled by default; others default to false
+    assert_eq!(body["claude_code"]["enabled"], true, "claude_code should be enabled by default");
+    assert!(body["claude_code"]["detected"].is_boolean());
+    for agent in ["cursor", "gemini_cli", "opencode", "codex", "copilot_cli"] {
+        assert_eq!(body[agent]["enabled"], false, "{agent} should be disabled by default");
         assert!(body[agent]["detected"].is_boolean());
     }
 }

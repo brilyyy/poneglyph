@@ -232,6 +232,11 @@ fn internal(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
+#[allow(dead_code)]
+fn not_found(msg: impl Into<String>) -> ErrorData {
+    ErrorData::invalid_params(msg.into(), None)
+}
+
 impl PoneglyphMcp {
     pub fn new(store: Arc<Mutex<Store>>, embedder: Option<Arc<Embedder>>, config: Arc<Config>) -> Self {
         Self { store, embedder, config, enrich: None }

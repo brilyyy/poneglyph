@@ -13,6 +13,7 @@ const POSTTOOLUSE_SH: &str = include_str!("../../../hooks/claude-code/posttoolus
 const USERPROMPTSUBMIT_SH: &str = include_str!("../../../hooks/claude-code/userpromptsubmit.sh");
 const STOP_SH: &str = include_str!("../../../hooks/claude-code/stop.sh");
 const SESSIONSTART_SH: &str = include_str!("../../../hooks/claude-code/sessionstart.sh");
+#[cfg(feature = "opencode")]
 const OPENCODE_PLUGIN_TS: &str = include_str!("../../../hooks/opencode/poneglyph.ts");
 const SKILL_MD: &str = include_str!("../../../skills/poneglyph/SKILL.md");
 
@@ -47,18 +48,26 @@ pub fn home_dir() -> Option<PathBuf> {
 /// Probe every configured agent and wire up the ones found installed.
 /// `hooks_dir` is where the bundled Claude Code hook scripts get copied
 /// (typically `Config::config_dir().join("hooks")`).
+#[allow(dead_code)]
 pub fn run_agent_setup(agents: &AgentsConfig, hooks_dir: &Path, exe: &str) -> Result<Vec<SetupOutcome>> {
     let Some(home) = home_dir() else {
         anyhow::bail!("could not resolve home directory");
     };
-    let out = vec![
+    #[allow(unused_mut)]
+    let mut out = vec![
         setup_claude_code(agents.claude_code, &home, hooks_dir, exe)?,
-        setup_cursor(agents.cursor, &home, exe)?,
-        setup_gemini_cli(agents.gemini_cli, &home, exe)?,
-        setup_opencode(agents.opencode, &home, exe)?,
-        setup_codex(agents.codex, &home, exe)?,
-        setup_copilot_cli(agents.copilot_cli, &home, exe)?,
     ];
+
+    #[cfg(feature = "cursor")]
+    out.push(setup_cursor(agents.cursor, &home, exe)?);
+    #[cfg(feature = "gemini")]
+    out.push(setup_gemini_cli(agents.gemini_cli, &home, exe)?);
+    #[cfg(feature = "opencode")]
+    out.push(setup_opencode(agents.opencode, &home, exe)?);
+    #[cfg(feature = "codex")]
+    out.push(setup_codex(agents.codex, &home, exe)?);
+    #[cfg(feature = "copilot")]
+    out.push(setup_copilot_cli(agents.copilot_cli, &home, exe)?);
 
     Ok(out)
 }
@@ -70,12 +79,26 @@ pub fn wire_agent(ide: &str, hooks_dir: &Path, exe: &str) -> Result<SetupOutcome
     };
     match ide {
         "claude-code" => setup_claude_code(true, &home, hooks_dir, exe),
+        #[cfg(feature = "opencode")]
         "opencode" => setup_opencode(true, &home, exe),
+        #[cfg(feature = "cursor")]
         "cursor" => setup_cursor(true, &home, exe),
+        #[cfg(feature = "gemini")]
         "gemini" => setup_gemini_cli(true, &home, exe),
+        #[cfg(feature = "codex")]
         "codex" => setup_codex(true, &home, exe),
+        #[cfg(feature = "copilot")]
         "copilot" => setup_copilot_cli(true, &home, exe),
-        _ => anyhow::bail!("unknown IDE '{ide}'. Options: claude-code, opencode, cursor, gemini, codex, copilot"),
+        _ => {
+            #[allow(unused_mut)]
+            let mut opts = vec!["claude-code"];
+            #[cfg(feature = "opencode")] opts.push("opencode");
+            #[cfg(feature = "cursor")] opts.push("cursor");
+            #[cfg(feature = "gemini")] opts.push("gemini");
+            #[cfg(feature = "codex")] opts.push("codex");
+            #[cfg(feature = "copilot")] opts.push("copilot");
+            anyhow::bail!("unknown IDE '{ide}'. Options: {}", opts.join(", "))
+        }
     }
 }
 
@@ -83,10 +106,15 @@ pub fn wire_agent(ide: &str, hooks_dir: &Path, exe: &str) -> Result<SetupOutcome
 pub fn inject_global_rules(ide: &str, home: &Path) -> Result<bool> {
     let path = match ide {
         "claude-code" => home.join(".claude").join("CLAUDE.md"),
+        #[cfg(feature = "opencode")]
         "opencode" => home.join(".config").join("opencode").join("AGENTS.md"),
+        #[cfg(feature = "cursor")]
         "cursor" => home.join(".cursor").join("rules"),
+        #[cfg(feature = "gemini")]
         "gemini" => home.join(".gemini").join("rules"),
+        #[cfg(feature = "codex")]
         "codex" => home.join(".codex").join("rules"),
+        #[cfg(feature = "copilot")]
         "copilot" => home.join(".copilot").join("rules"),
         _ => return Ok(false),
     };
@@ -115,6 +143,7 @@ fn setup_claude_code(enabled: bool, home: &Path, hooks_dir: &Path, exe: &str) ->
     Ok(SetupOutcome { agent: "claude-code", status })
 }
 
+#[cfg(feature = "cursor")]
 fn setup_cursor(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
         return Ok(SetupOutcome { agent: "cursor", status: SetupStatus::Disabled });
@@ -128,6 +157,7 @@ fn setup_cursor(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     Ok(SetupOutcome { agent: "cursor", status })
 }
 
+#[cfg(feature = "gemini")]
 fn setup_gemini_cli(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
         return Ok(SetupOutcome { agent: "gemini-cli", status: SetupStatus::Disabled });
@@ -141,6 +171,7 @@ fn setup_gemini_cli(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcom
     Ok(SetupOutcome { agent: "gemini-cli", status })
 }
 
+#[cfg(feature = "opencode")]
 fn setup_opencode(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
         return Ok(SetupOutcome { agent: "opencode", status: SetupStatus::Disabled });
@@ -156,6 +187,7 @@ fn setup_opencode(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome>
     Ok(SetupOutcome { agent: "opencode", status })
 }
 
+#[cfg(feature = "codex")]
 fn setup_codex(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
         return Ok(SetupOutcome { agent: "codex", status: SetupStatus::Disabled });
@@ -169,6 +201,7 @@ fn setup_codex(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     Ok(SetupOutcome { agent: "codex", status })
 }
 
+#[cfg(feature = "copilot")]
 fn setup_copilot_cli(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
         return Ok(SetupOutcome { agent: "copilot-cli", status: SetupStatus::Disabled });
@@ -271,6 +304,7 @@ fn merge_json_mcp_server(path: &Path, top_key: &str, include_type_stdio: bool, e
 
 /// Idempotently insert a `[mcp_servers.poneglyph]` table into a TOML config
 /// file. Returns whether the file changed.
+#[cfg(feature = "codex")]
 fn merge_codex_mcp_server(path: &Path, exe: &str) -> Result<bool> {
     let mut root: toml::Value = if path.exists() {
         std::fs::read_to_string(path)
@@ -299,6 +333,7 @@ fn merge_codex_mcp_server(path: &Path, exe: &str) -> Result<bool> {
 
 /// Copy the OpenCode plugin into `plugin_dir` if missing or stale. Returns
 /// whether the file changed.
+#[cfg(feature = "opencode")]
 fn install_opencode_plugin(plugin_dir: &Path) -> Result<bool> {
     std::fs::create_dir_all(plugin_dir).with_context(|| format!("failed to create {}", plugin_dir.display()))?;
     let path = plugin_dir.join("poneglyph.ts");
@@ -311,6 +346,7 @@ fn install_opencode_plugin(plugin_dir: &Path) -> Result<bool> {
 
 /// Idempotently insert a `poneglyph` MCP entry in opencode's JSON config.
 /// OpenCode uses array command format: `{ "command": ["poneglyph", "mcp"] }`.
+#[cfg(feature = "opencode")]
 fn merge_opencode_mcp_server(path: &Path, exe: &str) -> Result<bool> {
     let mut root = read_json_object(path)?;
     let obj = root.as_object_mut().with_context(|| format!("{} root must be a JSON object", path.display()))?;
@@ -326,6 +362,7 @@ fn merge_opencode_mcp_server(path: &Path, exe: &str) -> Result<bool> {
 }
 
 /// Write the bundled poneglyph skill into opencode's skills directory.
+#[cfg(feature = "opencode")]
 fn install_opencode_skill(skills_dir: &Path) -> Result<bool> {
     let dir = skills_dir.join("poneglyph");
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
@@ -360,11 +397,13 @@ fn install_skill_file(skills_dir: &Path) -> Result<bool> {
 const RULES_START: &str = "<!-- poneglyph:start -->";
 const RULES_END: &str = "<!-- poneglyph:end -->";
 const RULES_BODY: &str = "## poneglyph: durable memory + code graph\n\nThis project has poneglyph wired up (MCP server `poneglyph mcp`). Prefer\nits tools over re-deriving things or manually scanning directories:\n\n- `remember` / `recall` / `get_project_context` — durable cross-session\n  memory. Call `get_project_context` at session start, `recall` before\n  re-researching something, `remember` for durable facts/decisions/preferences.\n- `codegraph_query` (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/\n  `path:<a>..<b>`, or a bare keyword for a graph-backed name search) and\n  `codegraph_blast_radius` — call/import/test graph. ALWAYS try this FIRST\n  for \"find X\" / \"what calls/imports/breaks if I change X\" questions — it's\n  a targeted index lookup, not a directory walk, so it stays fast as the\n  codebase grows. Fall back to grep/glob only when the graph has nothing.\n  Requires `poneglyph graph init` to have been run once.";
+#[allow(dead_code)]
 const RULE_FILES: [&str; 3] = ["CLAUDE.md", "AGENTS.md", ".cursorrules"];
 
 /// For each of CLAUDE.md/AGENTS.md/.cursorrules that already exists directly
 /// under `project_dir`, idempotently insert/replace a fenced poneglyph usage
 /// block. Returns `(filename, changed)` for each file found.
+#[allow(dead_code)]
 pub fn inject_agent_rules(project_dir: &Path) -> Result<Vec<(String, bool)>> {
     let mut out = Vec::new();
     for name in RULE_FILES {
@@ -467,6 +506,21 @@ pub fn render_config_template(detected: &Detected) -> String {
 
     let embedding_block = "# provider = \"local\"        # local | ollama | openai\nmodel_id = \"sentence-transformers/all-MiniLM-L6-v2\"\n# model_path = \"...\"        # relative to data_dir, local provider only\ndimensions = 384\n# device = \"cpu\"            # cpu | cuda\n# batch_size = 32\n# query_prefix = \"\"           # prepended when embedding search queries (e5-family models want \"query: \")\n# passage_prefix = \"\"         # prepended when embedding stored text (e5-family models want \"passage: \")";
 
+    // Build agents section based on enabled features.
+    let mut agents_lines = vec!["# claude_code = true"];
+    #[cfg(feature = "cursor")]
+    agents_lines.push("# cursor = true");
+    #[cfg(feature = "gemini")]
+    agents_lines.push("# gemini_cli = true");
+    #[cfg(feature = "opencode")]
+    agents_lines.push("# opencode = true");
+    #[cfg(feature = "codex")]
+    agents_lines.push("# codex = true");
+    #[cfg(feature = "copilot")]
+    agents_lines.push("# copilot_cli = true");
+    agents_lines.push("# mcp_server_port = 37778");
+    let agents_block = agents_lines.join("\n");
+
     format!(
         r#"# Poneglyph configuration. Commented keys use built-in defaults; uncomment
 # to override. See https://github.com/ (poneglyph) for the full reference.
@@ -517,13 +571,7 @@ pub fn render_config_template(detected: &Detected) -> String {
 # items_per_page = 50
 
 [agents]
-# claude_code = true
-# cursor = true
-# gemini_cli = true
-# opencode = true
-# codex = true
-# copilot_cli = true
-# mcp_server_port = 37778
+{agents_block}
 
 [privacy]
 # redaction_tags = ["private", "secret", "confidential"]
@@ -598,6 +646,7 @@ mod tests {
         assert_eq!(v["mcp"]["poneglyph"]["args"][0], "mcp");
     }
 
+    #[cfg(feature = "opencode")]
     #[test]
     fn merge_opencode_mcp_server_uses_array_command() {
         let dir = tempdir().unwrap();
@@ -614,6 +663,7 @@ mod tests {
         assert!(!changed2, "second merge must be a no-op");
     }
 
+    #[cfg(feature = "opencode")]
     #[test]
     fn install_opencode_skill_writes_then_is_idempotent() {
         let dir = tempdir().unwrap();
@@ -659,6 +709,7 @@ mod tests {
         assert_eq!(v["hooks"]["PostToolUse"].as_array().unwrap().len(), 2, "must keep the pre-existing entry");
     }
 
+    #[cfg(feature = "codex")]
     #[test]
     fn merge_codex_mcp_server_inserts_then_is_idempotent() {
         let dir = tempdir().unwrap();
@@ -674,6 +725,7 @@ mod tests {
         assert!(!changed2, "second merge must be a no-op");
     }
 
+    #[cfg(feature = "codex")]
     #[test]
     fn merge_codex_mcp_server_preserves_existing_table() {
         let dir = tempdir().unwrap();
@@ -703,6 +755,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "opencode")]
     #[test]
     fn install_opencode_plugin_writes_then_is_idempotent() {
         let dir = tempdir().unwrap();
@@ -804,16 +857,28 @@ mod tests {
     fn run_agent_setup_respects_disabled_flags() {
         let agents = AgentsConfig {
             claude_code: false,
+            #[cfg(feature = "cursor")]
             cursor: false,
+            #[cfg(feature = "gemini")]
             gemini_cli: false,
+            #[cfg(feature = "opencode")]
             opencode: false,
+            #[cfg(feature = "codex")]
             codex: false,
+            #[cfg(feature = "copilot")]
             copilot_cli: false,
             mcp_server_port: 37778,
         };
         let dir = tempdir().unwrap();
         let outcomes = run_agent_setup(&agents, &dir.path().join("hooks"), "poneglyph").unwrap();
-        assert_eq!(outcomes.len(), 6);
+        // claude-code always present + any enabled features
+        let expected = 1
+            + if cfg!(feature = "cursor") { 1 } else { 0 }
+            + if cfg!(feature = "gemini") { 1 } else { 0 }
+            + if cfg!(feature = "opencode") { 1 } else { 0 }
+            + if cfg!(feature = "codex") { 1 } else { 0 }
+            + if cfg!(feature = "copilot") { 1 } else { 0 };
+        assert_eq!(outcomes.len(), expected);
         assert!(outcomes.iter().all(|o| o.status == SetupStatus::Disabled));
     }
 }

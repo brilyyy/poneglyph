@@ -1,17 +1,20 @@
 # poneglyph — Claude Code passive-capture hooks
 
-Thin shims that POST Claude Code session events to the local poneglyph
-`/ingest` endpoint (PRD §8.9). No business logic lives here — the server maps
-events to passive memories.
+Thin shims that call the `poneglyph` CLI to store session events as memories.
+No HTTP server needed — just `poneglyph` on PATH.
 
 ## Requirements
 
-- `poneglyph serve` running (HTTP on `127.0.0.1:3742` by default)
-- `jq` and `curl` on PATH
+- `poneglyph` on PATH
+- `jq` on PATH
 
 ## Install
 
 ```sh
+# Automatic (recommended):
+poneglyph wire claude-code
+
+# Manual:
 mkdir -p ~/.config/poneglyph/hooks
 cp posttooluse.sh userpromptsubmit.sh sessionstart.sh stop.sh ~/.config/poneglyph/hooks/
 chmod +x ~/.config/poneglyph/hooks/*.sh
@@ -25,17 +28,15 @@ captured; the scripts additionally skip read-only tools as a backstop.
 
 | Hook | Event | What it captures |
 |---|---|---|
-| `posttooluse.sh` | PostToolUse | Tool executions (name + input + output) as `code_context` memories |
-| `userpromptsubmit.sh` | UserPromptSubmit | User prompts as `episodic` memories |
-| `stop.sh` | Stop | Last assistant message from transcript as `episodic` memories |
-| `sessionstart.sh` | SessionStart | Injects project context (read-only GET, no POST) |
+| `posttooluse.sh` | PostToolUse | Tool executions as `code_context` memories via `poneglyph remember` |
+| `userpromptsubmit.sh` | UserPromptSubmit | User prompts as `episodic` memories via `poneglyph remember` |
+| `stop.sh` | Stop | Last assistant message from transcript as `episodic` memories via `poneglyph remember` |
+| `sessionstart.sh` | SessionStart | Injects project context via `poneglyph context` (read-only) |
 
 ## Environment
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PONEGLYPH_PORT` | `3742` | HTTP port of `poneglyph serve` |
-| `PONEGLYPH_TOKEN` | unset | Bearer token, required if `server.api_token` is set |
 | `PONEGLYPH_CONTEXT_TOKENS` | `600` | Token budget for SessionStart context injection |
 
 ## Session context injection (sessionstart.sh)
@@ -61,9 +62,9 @@ skipped to reduce noise.
 
 ## Behavior guarantees
 
-- Always exits 0 — a dead or missing poneglyph server never blocks Claude Code.
-- 2-second curl timeout.
-- Content truncated to 4000 chars before POSTing.
+- Always exits 0 — a missing `poneglyph` binary never blocks Claude Code.
+- Commands run in background (`&`) so they don't block the agent.
+- Content truncated to 4000 chars.
 - Tool output truncated to 2000 chars within the content.
 
 ## Verify

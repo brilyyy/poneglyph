@@ -12,3 +12,4 @@ pub mod cold;
 pub mod consolidate;
 pub mod privacy;
 pub mod compress;
+pub mod error;
