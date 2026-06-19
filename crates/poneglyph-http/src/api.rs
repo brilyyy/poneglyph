@@ -636,6 +636,46 @@ pub async fn patch_settings(
 }
 
 // ---------------------------------------------------------------------------
+// /api/session-summary
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct SessionSummaryQuery {
+    pub project_path: Option<String>,
+}
+
+pub async fn session_summary(
+    State(state): State<AppState>,
+    Query(q): Query<SessionSummaryQuery>,
+) -> ApiResult<Value> {
+    let store = state.store.lock().map_err(ApiError::internal)?;
+    let project_id = match &q.project_path {
+        Some(path) => project_id_for(&store, path)?,
+        None => None,
+    };
+
+    let (memories, _) = store.list_memories(project_id.as_deref(), Some("semantic"), 50, 0)
+        .map_err(ApiError::internal)?;
+
+    let summary = memories.iter().find(|m| {
+        m.metadata.as_ref()
+            .and_then(|meta| meta.get("tags"))
+            .and_then(|tags| tags.as_array())
+            .map(|arr| arr.iter().any(|t| t.as_str() == Some("session-summary")))
+            .unwrap_or(false)
+    });
+
+    match summary {
+        Some(mem) => Ok(Json(json!({
+            "content": mem.content,
+            "created_at": mem.created_at,
+            "id": mem.id,
+        }))),
+        None => Ok(Json(json!(null))),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // /healthz
 // ---------------------------------------------------------------------------
 

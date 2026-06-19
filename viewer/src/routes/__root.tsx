@@ -33,6 +33,7 @@ import {
   SidebarTrigger,
 } from '#/components/ui/sidebar.tsx'
 
+import logo from '/logo.svg'
 import '../styles.css'
 
 export const Route = createRootRoute({
@@ -61,6 +62,7 @@ function RootComponent() {
       <Sidebar collapsible="icon">
         <SidebarHeader>
           <div className="flex items-center gap-2 px-2 py-1.5 group-data-[collapsible=icon]:px-0">
+            <img src={logo} alt="poneglyph" className="h-8 w-8" />
             <span className="text-lg font-bold tracking-tight group-data-[collapsible=icon]:hidden">
               poneglyph
             </span>

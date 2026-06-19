@@ -34,4 +34,9 @@ poneglyph remember "$CONTENT" \
   ${CWD:+--project "$CWD"} \
   >/dev/null 2>&1 &
 
+# Generate session summary (extractive, no LLM needed).
+poneglyph session-summary \
+  ${CWD:+--project "$CWD"} \
+  >/dev/null 2>&1 &
+
 exit 0  # always succeed — never block Claude Code

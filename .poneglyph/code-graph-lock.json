@@ -5,8 +5,18 @@
     "typescript",
     "javascript",
     "python",
-    "go"
+    "go",
+    "c",
+    "cpp",
+    "java",
+    "csharp",
+    "php",
+    "ruby",
+    "kotlin",
+    "swift",
+    "bash",
+    "scala"
   ],
-  "last_build": "2026-06-19T18:38:34.061781+00:00",
+  "last_build": "2026-06-19T19:20:16.450469+00:00",
   "version": 1
 }

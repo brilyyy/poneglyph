@@ -80,8 +80,7 @@ instead of starting from zero every time.
 git clone https://github.com/brilyyy/poneglyph.git
 cd poneglyph
 cargo build --release
-./target/release/poneglyph init
-./target/release/poneglyph mcp      # MCP, for editor/agent integration
+cp target/release/poneglyph ~/.local/bin
 ```
 
 LLM-backed enrichment/compression is opt-in per provider and not compiled in
@@ -105,7 +104,7 @@ open http://127.0.0.1:3742
 - [COMPRESSION.md](docs/COMPRESSION.md) — semantic compression pipeline
 - [MIGRATION.md](docs/MIGRATION.md) — schema migration guide
 - [CHANGELOG.md](CHANGELOG.md) — notable changes by phase
-- [PRD](docs/poneglyph_PRD.md) — full product requirements document
+- [HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — how the system works
 
 ## Architecture
 

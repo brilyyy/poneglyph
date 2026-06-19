@@ -103,6 +103,15 @@ enum Command {
         /// IDE to wire: claude-code, opencode, cursor, gemini, codex, copilot
         ide: String,
     },
+    /// Generate or display session summaries (for hooks)
+    SessionSummary {
+        /// Project path to scope the summary to
+        #[arg(long)]
+        project: Option<String>,
+        /// Show the most recent session summary instead of generating a new one
+        #[arg(long)]
+        latest: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -208,6 +217,7 @@ async fn run(command: Command, config: &Config) -> Result<()> {
         Command::Status => cmd_status(&config),
         Command::Graph { action } => cmd_graph(&config, action),
         Command::Wire { ide } => cmd_wire(&config, &ide),
+        Command::SessionSummary { project, latest } => cmd_session_summary(&config, project.as_deref(), latest).await,
     }
 }
 
@@ -787,6 +797,85 @@ fn update_graph_lock() {
     let Ok(mut lock) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
     lock["last_build"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
     let _ = std::fs::write(lock_path, serde_json::to_string_pretty(&lock).unwrap_or_default());
+}
+
+async fn cmd_session_summary(config: &Config, project_path: Option<&str>, latest: bool) -> Result<()> {
+    config.ensure_dirs()?;
+    let store = Store::open(&config.db_path)?;
+
+    // Resolve project
+    let project_id = match project_path {
+        Some(path) => Some(poneglyph_core::project::detect_project(&store, path)?.id),
+        None => None,
+    };
+
+    if latest {
+        // Show the most recent session-summary memory
+        let (memories, _) = store.list_memories(project_id.as_deref(), Some("semantic"), 50, 0)?;
+        let summary = memories.iter().find(|m| {
+            m.metadata.as_ref()
+                .and_then(|meta| meta.get("tags"))
+                .and_then(|tags| tags.as_array())
+                .map(|arr| arr.iter().any(|t| t.as_str() == Some("session-summary")))
+                .unwrap_or(false)
+        });
+
+        match summary {
+            Some(mem) => print!("{}", mem.content),
+            None => { /* no summary yet, silent */ }
+        }
+        return Ok(());
+    }
+
+    // Generate a new extractive summary from recent session memories
+    let (memories, _) = store.list_memories(project_id.as_deref(), None, 30, 0)?;
+
+    // Filter to real memories (not decoys, not session-summary tags)
+    let real: Vec<_> = memories.iter().filter(|m| {
+        !m.is_decoy && !m.metadata.as_ref()
+            .and_then(|meta| meta.get("tags"))
+            .and_then(|tags| tags.as_array())
+            .map(|arr| arr.iter().any(|t| t.as_str() == Some("session-summary")))
+            .unwrap_or(false)
+    }).collect();
+
+    if real.is_empty() {
+        return Ok(());
+    }
+
+    // Extractive summary: top 5 by importance, joined
+    let mut sorted = real.clone();
+    sorted.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+    let top: Vec<_> = sorted.iter().take(5).collect();
+    let summary_text = top.iter()
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+
+    // Truncate to ~2000 chars
+    let summary_text = if summary_text.len() > 2000 {
+        format!("{}...", &summary_text[..2000])
+    } else {
+        summary_text
+    };
+
+    // Store as a tagged memory
+    let metadata = serde_json::json!({ "tags": ["session-summary"] });
+    let mem = store.create_memory(
+        &summary_text,
+        MemoryType::Semantic,
+        0.3, // low importance — summaries are context, not facts
+        Source::Cli,
+        project_id.as_deref(),
+        Some(&metadata),
+    )?;
+    store.index_fts(&mem.id, &summary_text)?;
+
+    // Enqueue edges (non-blocking)
+    let _ = poneglyph_core::enrich::enqueue_compute_edges(&store, &mem.id);
+
+    println!("{}", mem.id);
+    Ok(())
 }
 
 fn truncate(s: &str, max_len: usize) -> String {

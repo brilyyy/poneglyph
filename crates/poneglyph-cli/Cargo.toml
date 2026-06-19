@@ -8,7 +8,7 @@ name = "poneglyph"
 path = "src/main.rs"
 
 [features]
-default = ["claude-code"]
+default = ["claude-code", "viewer", "llm-openai"]
 
 # Agent integrations — claude-code is the default; others are opt-in.
 claude-code = []
@@ -49,4 +49,3 @@ notify         = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-

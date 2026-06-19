@@ -60,7 +60,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/codegraph", get(api::codegraph_graph))
         .route("/codegraph/stats", get(api::codegraph_stats))
         .route("/token-savings", get(api::token_savings))
-        .route("/agents-status", get(api::agents_status));
+        .route("/agents-status", get(api::agents_status))
+        .route("/session-summary", get(api::session_summary));
 
     let guarded = Router::new()
         .nest("/api", api_routes)

@@ -3,7 +3,7 @@
 //! one's existing config files (never clobbering unrelated user settings).
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -49,14 +49,21 @@ pub fn home_dir() -> Option<PathBuf> {
 /// `hooks_dir` is where the bundled Claude Code hook scripts get copied
 /// (typically `Config::config_dir().join("hooks")`).
 #[allow(dead_code)]
-pub fn run_agent_setup(agents: &AgentsConfig, hooks_dir: &Path, exe: &str) -> Result<Vec<SetupOutcome>> {
+pub fn run_agent_setup(
+    agents: &AgentsConfig,
+    hooks_dir: &Path,
+    exe: &str,
+) -> Result<Vec<SetupOutcome>> {
     let Some(home) = home_dir() else {
         anyhow::bail!("could not resolve home directory");
     };
     #[allow(unused_mut)]
-    let mut out = vec![
-        setup_claude_code(agents.claude_code, &home, hooks_dir, exe)?,
-    ];
+    let mut out = vec![setup_claude_code(
+        agents.claude_code,
+        &home,
+        hooks_dir,
+        exe,
+    )?];
 
     #[cfg(feature = "cursor")]
     out.push(setup_cursor(agents.cursor, &home, exe)?);
@@ -92,11 +99,16 @@ pub fn wire_agent(ide: &str, hooks_dir: &Path, exe: &str) -> Result<SetupOutcome
         _ => {
             #[allow(unused_mut)]
             let mut opts = vec!["claude-code"];
-            #[cfg(feature = "opencode")] opts.push("opencode");
-            #[cfg(feature = "cursor")] opts.push("cursor");
-            #[cfg(feature = "gemini")] opts.push("gemini");
-            #[cfg(feature = "codex")] opts.push("codex");
-            #[cfg(feature = "copilot")] opts.push("copilot");
+            #[cfg(feature = "opencode")]
+            opts.push("opencode");
+            #[cfg(feature = "cursor")]
+            opts.push("cursor");
+            #[cfg(feature = "gemini")]
+            opts.push("gemini");
+            #[cfg(feature = "codex")]
+            opts.push("codex");
+            #[cfg(feature = "copilot")]
+            opts.push("copilot");
             anyhow::bail!("unknown IDE '{ide}'. Options: {}", opts.join(", "))
         }
     }
@@ -119,18 +131,30 @@ pub fn inject_global_rules(ide: &str, home: &Path) -> Result<bool> {
         _ => return Ok(false),
     };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     inject_rules_block(&path)
 }
 
-fn setup_claude_code(enabled: bool, home: &Path, hooks_dir: &Path, exe: &str) -> Result<SetupOutcome> {
+fn setup_claude_code(
+    enabled: bool,
+    home: &Path,
+    hooks_dir: &Path,
+    exe: &str,
+) -> Result<SetupOutcome> {
     if !enabled {
-        return Ok(SetupOutcome { agent: "claude-code", status: SetupStatus::Disabled });
+        return Ok(SetupOutcome {
+            agent: "claude-code",
+            status: SetupStatus::Disabled,
+        });
     }
     let claude_dir = home.join(".claude");
     if !claude_dir.exists() {
-        return Ok(SetupOutcome { agent: "claude-code", status: SetupStatus::NotDetected });
+        return Ok(SetupOutcome {
+            agent: "claude-code",
+            status: SetupStatus::NotDetected,
+        });
     }
 
     install_hook_scripts(hooks_dir)?;
@@ -138,81 +162,160 @@ fn setup_claude_code(enabled: bool, home: &Path, hooks_dir: &Path, exe: &str) ->
     let mcp_changed = merge_json_mcp_server(&home.join(".claude.json"), "mcpServers", true, exe)?;
     let skill_changed = install_skill_file(&claude_dir.join("skills"))?;
 
-    let status =
-        if hooks_changed || mcp_changed || skill_changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured };
-    Ok(SetupOutcome { agent: "claude-code", status })
+    let status = if hooks_changed || mcp_changed || skill_changed {
+        SetupStatus::Configured
+    } else {
+        SetupStatus::AlreadyConfigured
+    };
+    Ok(SetupOutcome {
+        agent: "claude-code",
+        status,
+    })
 }
 
 #[cfg(feature = "cursor")]
 fn setup_cursor(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
-        return Ok(SetupOutcome { agent: "cursor", status: SetupStatus::Disabled });
+        return Ok(SetupOutcome {
+            agent: "cursor",
+            status: SetupStatus::Disabled,
+        });
     }
     let cursor_dir = home.join(".cursor");
     if !cursor_dir.exists() {
-        return Ok(SetupOutcome { agent: "cursor", status: SetupStatus::NotDetected });
+        return Ok(SetupOutcome {
+            agent: "cursor",
+            status: SetupStatus::NotDetected,
+        });
     }
     let changed = merge_json_mcp_server(&cursor_dir.join("mcp.json"), "mcpServers", true, exe)?;
-    let status = if changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured };
-    Ok(SetupOutcome { agent: "cursor", status })
+    let status = if changed {
+        SetupStatus::Configured
+    } else {
+        SetupStatus::AlreadyConfigured
+    };
+    Ok(SetupOutcome {
+        agent: "cursor",
+        status,
+    })
 }
 
 #[cfg(feature = "gemini")]
 fn setup_gemini_cli(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
-        return Ok(SetupOutcome { agent: "gemini-cli", status: SetupStatus::Disabled });
+        return Ok(SetupOutcome {
+            agent: "gemini-cli",
+            status: SetupStatus::Disabled,
+        });
     }
     let gemini_dir = home.join(".gemini");
     if !gemini_dir.exists() {
-        return Ok(SetupOutcome { agent: "gemini-cli", status: SetupStatus::NotDetected });
+        return Ok(SetupOutcome {
+            agent: "gemini-cli",
+            status: SetupStatus::NotDetected,
+        });
     }
-    let changed = merge_json_mcp_server(&gemini_dir.join("settings.json"), "mcpServers", true, exe)?;
-    let status = if changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured };
-    Ok(SetupOutcome { agent: "gemini-cli", status })
+    let changed =
+        merge_json_mcp_server(&gemini_dir.join("settings.json"), "mcpServers", true, exe)?;
+    let status = if changed {
+        SetupStatus::Configured
+    } else {
+        SetupStatus::AlreadyConfigured
+    };
+    Ok(SetupOutcome {
+        agent: "gemini-cli",
+        status,
+    })
 }
 
 #[cfg(feature = "opencode")]
 fn setup_opencode(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
-        return Ok(SetupOutcome { agent: "opencode", status: SetupStatus::Disabled });
+        return Ok(SetupOutcome {
+            agent: "opencode",
+            status: SetupStatus::Disabled,
+        });
     }
     let opencode_dir = home.join(".config").join("opencode");
     if !opencode_dir.exists() {
-        return Ok(SetupOutcome { agent: "opencode", status: SetupStatus::NotDetected });
+        return Ok(SetupOutcome {
+            agent: "opencode",
+            status: SetupStatus::NotDetected,
+        });
     }
     let plugin_changed = install_opencode_plugin(&opencode_dir.join("plugins"))?;
     let mcp_changed = merge_opencode_mcp_server(&opencode_dir.join("opencode.json"), exe)?;
     let skill_changed = install_opencode_skill(&opencode_dir.join("skills"))?;
-    let status = if plugin_changed || mcp_changed || skill_changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured };
-    Ok(SetupOutcome { agent: "opencode", status })
+    let status = if plugin_changed || mcp_changed || skill_changed {
+        SetupStatus::Configured
+    } else {
+        SetupStatus::AlreadyConfigured
+    };
+    Ok(SetupOutcome {
+        agent: "opencode",
+        status,
+    })
 }
 
 #[cfg(feature = "codex")]
 fn setup_codex(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
-        return Ok(SetupOutcome { agent: "codex", status: SetupStatus::Disabled });
+        return Ok(SetupOutcome {
+            agent: "codex",
+            status: SetupStatus::Disabled,
+        });
     }
     let codex_dir = home.join(".codex");
     if !codex_dir.exists() {
-        return Ok(SetupOutcome { agent: "codex", status: SetupStatus::NotDetected });
+        return Ok(SetupOutcome {
+            agent: "codex",
+            status: SetupStatus::NotDetected,
+        });
     }
     let changed = merge_codex_mcp_server(&codex_dir.join("config.toml"), exe)?;
-    let status = if changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured };
-    Ok(SetupOutcome { agent: "codex", status })
+    let status = if changed {
+        SetupStatus::Configured
+    } else {
+        SetupStatus::AlreadyConfigured
+    };
+    Ok(SetupOutcome {
+        agent: "codex",
+        status,
+    })
 }
 
 #[cfg(feature = "copilot")]
 fn setup_copilot_cli(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
-        return Ok(SetupOutcome { agent: "copilot-cli", status: SetupStatus::Disabled });
+        return Ok(SetupOutcome {
+            agent: "copilot-cli",
+            status: SetupStatus::Disabled,
+        });
     }
-    let copilot_home = std::env::var_os("COPILOT_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".copilot"));
+    let copilot_home = std::env::var_os("COPILOT_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".copilot"));
     if !copilot_home.exists() {
-        return Ok(SetupOutcome { agent: "copilot-cli", status: SetupStatus::NotDetected });
+        return Ok(SetupOutcome {
+            agent: "copilot-cli",
+            status: SetupStatus::NotDetected,
+        });
     }
-    let changed = merge_json_mcp_server(&copilot_home.join("mcp-config.json"), "mcpServers", true, exe)?;
-    let status = if changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured };
-    Ok(SetupOutcome { agent: "copilot-cli", status })
+    let changed = merge_json_mcp_server(
+        &copilot_home.join("mcp-config.json"),
+        "mcpServers",
+        true,
+        exe,
+    )?;
+    let status = if changed {
+        SetupStatus::Configured
+    } else {
+        SetupStatus::AlreadyConfigured
+    };
+    Ok(SetupOutcome {
+        agent: "copilot-cli",
+        status,
+    })
 }
 
 /// Write the bundled Claude Code hook scripts into `hooks_dir`, executable
@@ -226,7 +329,8 @@ fn install_hook_scripts(hooks_dir: &Path) -> Result<()> {
         ("sessionstart.sh", SESSIONSTART_SH),
     ] {
         let path = hooks_dir.join(name);
-        std::fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
+        std::fs::write(&path, content)
+            .with_context(|| format!("failed to write {}", path.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -243,12 +347,21 @@ fn install_hook_scripts(hooks_dir: &Path) -> Result<()> {
 /// file changed.
 fn merge_claude_code_hooks(settings_path: &Path, hooks_dir: &Path) -> Result<bool> {
     let mut root = read_json_object(settings_path)?;
-    let obj = root.as_object_mut().context("settings.json root must be a JSON object")?;
+    let obj = root
+        .as_object_mut()
+        .context("settings.json root must be a JSON object")?;
     let hooks_val = obj.entry("hooks").or_insert_with(|| json!({}));
-    let hooks_obj = hooks_val.as_object_mut().context("\"hooks\" key must be a JSON object")?;
+    let hooks_obj = hooks_val
+        .as_object_mut()
+        .context("\"hooks\" key must be a JSON object")?;
 
     let specs: [(&str, &str, u64, Option<&str>); 4] = [
-        ("PostToolUse", "posttooluse.sh", 5, Some("Edit|Write|MultiEdit|Bash|NotebookEdit|Agent|Task")),
+        (
+            "PostToolUse",
+            "posttooluse.sh",
+            5,
+            Some("Edit|Write|MultiEdit|Bash|NotebookEdit|Agent|Task"),
+        ),
         ("UserPromptSubmit", "userpromptsubmit.sh", 5, None),
         ("Stop", "stop.sh", 10, None),
         ("SessionStart", "sessionstart.sh", 5, None),
@@ -258,17 +371,23 @@ fn merge_claude_code_hooks(settings_path: &Path, hooks_dir: &Path) -> Result<boo
     for (event, script, timeout, matcher) in specs {
         let command = hooks_dir.join(script).display().to_string();
         let arr_val = hooks_obj.entry(event).or_insert_with(|| json!([]));
-        let arr = arr_val.as_array_mut().context("hook event entry must be a JSON array")?;
+        let arr = arr_val
+            .as_array_mut()
+            .context("hook event entry must be a JSON array")?;
         let already_present = arr.iter().any(|entry| {
             entry
                 .get("hooks")
                 .and_then(Value::as_array)
-                .is_some_and(|hs| hs.iter().any(|h| h.get("command").and_then(Value::as_str) == Some(command.as_str())))
+                .is_some_and(|hs| {
+                    hs.iter()
+                        .any(|h| h.get("command").and_then(Value::as_str) == Some(command.as_str()))
+                })
         });
         if already_present {
             continue;
         }
-        let mut block = json!({ "hooks": [{ "type": "command", "command": command, "timeout": timeout }] });
+        let mut block =
+            json!({ "hooks": [{ "type": "command", "command": command, "timeout": timeout }] });
         if let Some(m) = matcher {
             block["matcher"] = json!(m);
         }
@@ -285,11 +404,20 @@ fn merge_claude_code_hooks(settings_path: &Path, hooks_dir: &Path) -> Result<boo
 /// Idempotently insert a `poneglyph` entry under `top_key` in a JSON config
 /// file. Leaves any existing `poneglyph` entry untouched. Returns whether
 /// the file changed.
-fn merge_json_mcp_server(path: &Path, top_key: &str, include_type_stdio: bool, exe: &str) -> Result<bool> {
+fn merge_json_mcp_server(
+    path: &Path,
+    top_key: &str,
+    include_type_stdio: bool,
+    exe: &str,
+) -> Result<bool> {
     let mut root = read_json_object(path)?;
-    let obj = root.as_object_mut().with_context(|| format!("{} root must be a JSON object", path.display()))?;
+    let obj = root
+        .as_object_mut()
+        .with_context(|| format!("{} root must be a JSON object", path.display()))?;
     let servers_val = obj.entry(top_key).or_insert_with(|| json!({}));
-    let servers = servers_val.as_object_mut().with_context(|| format!("\"{top_key}\" key must be a JSON object"))?;
+    let servers = servers_val
+        .as_object_mut()
+        .with_context(|| format!("\"{top_key}\" key must be a JSON object"))?;
     if servers.contains_key("poneglyph") {
         return Ok(false);
     }
@@ -314,20 +442,31 @@ fn merge_codex_mcp_server(path: &Path, exe: &str) -> Result<bool> {
     } else {
         toml::Value::Table(Default::default())
     };
-    let table = root.as_table_mut().with_context(|| format!("{} root must be a TOML table", path.display()))?;
-    let servers_val = table.entry("mcp_servers").or_insert_with(|| toml::Value::Table(Default::default()));
-    let servers = servers_val.as_table_mut().context("\"mcp_servers\" key must be a TOML table")?;
+    let table = root
+        .as_table_mut()
+        .with_context(|| format!("{} root must be a TOML table", path.display()))?;
+    let servers_val = table
+        .entry("mcp_servers")
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    let servers = servers_val
+        .as_table_mut()
+        .context("\"mcp_servers\" key must be a TOML table")?;
     if servers.contains_key("poneglyph") {
         return Ok(false);
     }
     let mut entry = toml::value::Table::new();
     entry.insert("command".into(), toml::Value::String(exe.into()));
-    entry.insert("args".into(), toml::Value::Array(vec![toml::Value::String("mcp".into())]));
+    entry.insert(
+        "args".into(),
+        toml::Value::Array(vec![toml::Value::String("mcp".into())]),
+    );
     servers.insert("poneglyph".into(), toml::Value::Table(entry));
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    std::fs::write(path, toml::to_string_pretty(&root)?).with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(path, toml::to_string_pretty(&root)?)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(true)
 }
 
@@ -335,11 +474,16 @@ fn merge_codex_mcp_server(path: &Path, exe: &str) -> Result<bool> {
 /// whether the file changed.
 #[cfg(feature = "opencode")]
 fn install_opencode_plugin(plugin_dir: &Path) -> Result<bool> {
-    std::fs::create_dir_all(plugin_dir).with_context(|| format!("failed to create {}", plugin_dir.display()))?;
+    std::fs::create_dir_all(plugin_dir)
+        .with_context(|| format!("failed to create {}", plugin_dir.display()))?;
     let path = plugin_dir.join("poneglyph.ts");
-    let stale = !path.exists() || std::fs::read_to_string(&path).map(|s| s != OPENCODE_PLUGIN_TS).unwrap_or(true);
+    let stale = !path.exists()
+        || std::fs::read_to_string(&path)
+            .map(|s| s != OPENCODE_PLUGIN_TS)
+            .unwrap_or(true);
     if stale {
-        std::fs::write(&path, OPENCODE_PLUGIN_TS).with_context(|| format!("failed to write {}", path.display()))?;
+        std::fs::write(&path, OPENCODE_PLUGIN_TS)
+            .with_context(|| format!("failed to write {}", path.display()))?;
     }
     Ok(stale)
 }
@@ -349,9 +493,13 @@ fn install_opencode_plugin(plugin_dir: &Path) -> Result<bool> {
 #[cfg(feature = "opencode")]
 fn merge_opencode_mcp_server(path: &Path, exe: &str) -> Result<bool> {
     let mut root = read_json_object(path)?;
-    let obj = root.as_object_mut().with_context(|| format!("{} root must be a JSON object", path.display()))?;
+    let obj = root
+        .as_object_mut()
+        .with_context(|| format!("{} root must be a JSON object", path.display()))?;
     let servers_val = obj.entry("mcp").or_insert_with(|| json!({}));
-    let servers = servers_val.as_object_mut().context("\"mcp\" key must be a JSON object")?;
+    let servers = servers_val
+        .as_object_mut()
+        .context("\"mcp\" key must be a JSON object")?;
     if servers.contains_key("poneglyph") {
         return Ok(false);
     }
@@ -367,9 +515,13 @@ fn install_opencode_skill(skills_dir: &Path) -> Result<bool> {
     let dir = skills_dir.join("poneglyph");
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let path = dir.join("SKILL.md");
-    let stale = !path.exists() || std::fs::read_to_string(&path).map(|s| s != SKILL_MD).unwrap_or(true);
+    let stale = !path.exists()
+        || std::fs::read_to_string(&path)
+            .map(|s| s != SKILL_MD)
+            .unwrap_or(true);
     if stale {
-        std::fs::write(&path, SKILL_MD).with_context(|| format!("failed to write {}", path.display()))?;
+        std::fs::write(&path, SKILL_MD)
+            .with_context(|| format!("failed to write {}", path.display()))?;
     }
     Ok(stale)
 }
@@ -381,9 +533,13 @@ fn install_skill_file(skills_dir: &Path) -> Result<bool> {
     let dir = skills_dir.join("poneglyph");
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let path = dir.join("SKILL.md");
-    let stale = !path.exists() || std::fs::read_to_string(&path).map(|s| s != SKILL_MD).unwrap_or(true);
+    let stale = !path.exists()
+        || std::fs::read_to_string(&path)
+            .map(|s| s != SKILL_MD)
+            .unwrap_or(true);
     if stale {
-        std::fs::write(&path, SKILL_MD).with_context(|| format!("failed to write {}", path.display()))?;
+        std::fs::write(&path, SKILL_MD)
+            .with_context(|| format!("failed to write {}", path.display()))?;
     }
     Ok(stale)
 }
@@ -422,7 +578,8 @@ pub fn inject_agent_rules(project_dir: &Path) -> Result<Vec<(String, bool)>> {
 /// Creates the file if it doesn't exist.
 fn inject_rules_block(path: &Path) -> Result<bool> {
     let existing = if path.exists() {
-        std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?
+        std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?
     } else {
         String::new()
     };
@@ -434,7 +591,11 @@ fn inject_rules_block(path: &Path) -> Result<bool> {
             format!("{}{}{}", &existing[..start], block, &existing[end..])
         }
         _ => {
-            let sep = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+            let sep = if existing.is_empty() || existing.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
             format!("{existing}{sep}\n{block}\n")
         }
     };
@@ -443,9 +604,11 @@ fn inject_rules_block(path: &Path) -> Result<bool> {
         return Ok(false);
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    std::fs::write(path, new_content).with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(path, new_content)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(true)
 }
 
@@ -453,15 +616,18 @@ fn read_json_object(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(json!({}));
     }
-    let raw = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(value)?).with_context(|| format!("failed to write {}", path.display()))
+    std::fs::write(path, serde_json::to_string_pretty(value)?)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -482,14 +648,25 @@ pub fn detect_local_llm() -> Detected {
         format!("127.0.0.1:{port}")
             .parse()
             .ok()
-            .is_some_and(|addr| std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok())
+            .is_some_and(|addr| {
+                std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+            })
     };
     if reachable(11434) {
-        Detected { llm_provider: Some("ollama"), llm_base_url: Some("http://localhost:11434/v1") }
+        Detected {
+            llm_provider: Some("ollama"),
+            llm_base_url: Some("http://localhost:11434/v1"),
+        }
     } else if reachable(1234) {
-        Detected { llm_provider: Some("lmstudio"), llm_base_url: Some("http://localhost:1234/v1") }
+        Detected {
+            llm_provider: Some("lmstudio"),
+            llm_base_url: Some("http://localhost:1234/v1"),
+        }
     } else {
-        Detected { llm_provider: None, llm_base_url: None }
+        Detected {
+            llm_provider: None,
+            llm_base_url: None,
+        }
     }
 }
 
@@ -503,8 +680,6 @@ pub fn render_config_template(detected: &Detected) -> String {
         ),
         _ => "# enabled = false\n# provider = \"ollama\"  # openai | anthropic | gemini | ollama | lmstudio | gpt4all  (each needs a matching --features llm-* build)\n# base_url = \"http://localhost:11434/v1\"\n# model = \"...\"\n# api_key = \"...\"  # prefer PONEGLYPH_LLM_API_KEY env var\n# timeout_seconds = 60\n# max_generation_tokens = 2048".to_string(),
     };
-
-    let embedding_block = "# provider = \"local\"        # local | ollama | openai\nmodel_id = \"sentence-transformers/all-MiniLM-L6-v2\"\n# model_path = \"...\"        # relative to data_dir, local provider only\ndimensions = 384\n# device = \"cpu\"            # cpu | cuda\n# batch_size = 32\n# query_prefix = \"\"           # prepended when embedding search queries (e5-family models want \"query: \")\n# passage_prefix = \"\"         # prepended when embedding stored text (e5-family models want \"passage: \")";
 
     // Build agents section based on enabled features.
     let mut agents_lines = vec!["# claude_code = true"];
@@ -523,81 +698,215 @@ pub fn render_config_template(detected: &Detected) -> String {
 
     format!(
         r#"# Poneglyph configuration. Commented keys use built-in defaults; uncomment
-# to override. See https://github.com/ (poneglyph) for the full reference.
+# to override. Supports {{ env.VAR_NAME }} interpolation for secrets.
 
 [general]
-# data_dir = "..."          # defaults to the XDG data directory
+# Where poneglyph stores its database, embeddings cache, and cold storage.
+# Defaults to the XDG data directory (~/.local/share/poneglyph on Linux).
+# data_dir = "..."
+
+# Verbosity of logs written to stderr. "info" is quiet; "debug" shows
+# every memory insert/recall; "trace" dumps SQL and embedding timings.
 # log_level = "info"        # trace | debug | info | warn | error
+
+# Automatically check for new poneglyph releases on startup.
 # auto_update = true
 
 [embedding]
-{embedding_block}
+# --- Embedding provider ---
+# "local" runs the model on your CPU/GPU via Candle (no network calls).
+# "ollama" or "offload" delegates to an external embedding API.
+# provider = "local"        # local | ollama | openai
+
+# The HuggingFace model ID used for dense vector embeddings.
+# MiniLM-L6-v2 is fast (384 dims, ~30ms/batch on CPU) and accurate enough
+# for code + prose. Swap to a larger model only if recall quality is poor.
+model_id = "sentence-transformers/all-MiniLM-L6-v2"
+
+# Path to a pre-downloaded model directory (local provider only).
+# If unset, the model is downloaded to the data_dir on first use.
+# model_path = "..."
+
+# Vector dimensions — must match the model. MiniLM-L6-v2 = 384.
+# Changing this requires re-embedding all memories (delete vec_memories.db).
+dimensions = 384
+
+# Compute device for the local embedding model. "cuda" requires a CUDA GPU.
+# device = "cpu"            # cpu | cuda
+
+# How many texts to embed in one forward pass. Higher = faster throughput,
+# more memory. 32 is safe for 8GB RAM; bump to 128 if you have 32GB+.
+# batch_size = 32
+
+# Prefixes prepended to queries/passages before embedding. Required for
+# e5-family models (they expect "query: " / "passage: "). MiniLM uses none.
+# query_prefix = ""
+# passage_prefix = ""
 
 [llm]
 {llm_block}
 
 [memory]
+# Master switch for the memory system. When false, poneglyph stores nothing
+# and all MCP tools become no-ops.
 # enabled = true
+
+# How often (seconds) the in-memory buffer flushes to SQLite.
+# Lower = less data loss on crash, more write I/O. 5s is a good balance.
 # flush_interval_secs = 5
+
+# Maximum tokens per memory entry. Content longer than this is truncated
+# at the token boundary. 4000 tokens ≈ 3000 words ≈ one long paragraph.
 # max_entry_tokens = 4000
-# compression_enabled = false   # caveman-grammar prose compression at rest
+
+# Caveman-grammar prose compression: common English words become single
+# Unicode codepoints, shrinking storage ~40%. Reversible; code/paths/versions
+# are never touched. Enable when you have 10k+ memories.
+# compression_enabled = false
+
+# Minimum hybrid retrieval score (0.0–1.0) for a memory to be returned.
+# Lower = more results, more noise. 0.6 filters out weak matches.
 # min_relevance_score = 0.6
 
 [memory.layer_retention]
-# ephemeral = 0    # 0 = session-only
-# short_term = 7
-# working = 30
-# long_term = 180
-# archival = 0     # 0 = permanent
+# How many days memories live in each tier before expiring.
+# 0 = special: ephemeral (0) = deleted on session end; archival (0) = forever.
+# Memories are promoted/demoted by access frequency and strength.
+# ephemeral = 0    # 0 = session-only (deleted on session end)
+# short_term = 7   # active work, recent context
+# working = 30     # regular use, project context
+# long_term = 180  # rarely accessed but worth keeping
+# archival = 0     # 0 = permanent (never auto-deleted)
 
 [memory.edges]
+# Minimum cosine similarity (0.0–1.0) to create a similarity edge between
+# two memories. Higher = fewer, more precise connections. 0.82 is tuned for
+# MiniLM-L6-v2; adjust if you switch embedding models.
 # similarity_threshold = 0.82
+
+# Maximum time gap (seconds) between memories in the same project to create
+# a temporal edge. 300s = 5 min. Two memories created 4 min apart in the same
+# project get linked. Useful for "what was I working on together" queries.
 # temporal_window_secs = 300
 
 [graph]
+# Master switch for the tree-sitter code knowledge graph.
+# When false, `poneglyph graph` commands and `codegraph_*` MCP tools are no-ops.
 # enabled = true
+
+# Languages to parse. Each needs a matching tree-sitter grammar compiled in.
+# Remove languages you never use to speed up graph builds.
 # languages = ["rust", "typescript", "javascript", "python", "go"]
+
+# Glob patterns for files/directories to skip during graph builds.
+# Honors .poneglyphignore (gitignore syntax) in addition to these.
 # exclude_patterns = ["**/target/**", "**/node_modules/**", "**/.git/**", "**/*.test.ts", "**/*_test.rs"]
+
+# Debounce delay (ms) before re-parsing after a file change during `graph watch`.
+# Lower = more responsive, more CPU. 2000ms batches rapid saves.
 # watch_delay_ms = 2000
+
+# Maximum depth for blast-radius queries. Higher = more transitive dependents
+# found, slower queries. 5 covers most real-world call chains.
 # blast_radius_depth = 5
 
+# Maximum nodes rendered in the code graph visualization.
+# Lower = faster WebGL rendering, may clip large graphs.
+# max_render_nodes = 50000
+
 [dashboard]
+# Web dashboard served at http://host:port. Provides memory browsing,
+# timeline, search, graph visualization, and settings UI.
 # enabled = true
+
+# Network port for the dashboard HTTP server.
 # port = 3742
+
+# Bind address. "127.0.0.1" = local only; "0.0.0.0" = accessible from LAN.
 # host = "127.0.0.1"
+
+# Automatically open the dashboard in your browser on `poneglyph viewer`.
 # open_on_start = false
-# token = "..."        # prefer PONEGLYPH_DASHBOARD_TOKEN env var
+
+# Bearer token for API authentication. Empty = no auth (local use only).
+# Prefer the PONEGLYPH_DASHBOARD_TOKEN env var over hardcoding.
+# token = "..."
+
+# Color theme for the dashboard UI. "system" follows your OS preference.
 # theme = "system"     # system | dark | light
+
+# Number of items per page in list views (memories, search results, etc.).
 # items_per_page = 50
 
 [agents]
+# Enable/disable hooks and plugins for each coding agent.
+# Only claude_code is on by default; others need matching --features builds.
 {agents_block}
 
 [privacy]
+# Memories tagged with any of these strings are excluded from retrieval
+# and never returned by recall/context. Useful for secrets, credentials, etc.
 # redaction_tags = ["private", "secret", "confidential"]
+
+# Glob patterns for files whose content is never stored as memories.
+# Applied during hook capture (posttooluse, userpromptsubmit).
 # exclude_paths = ["**/.env", "**/*.pem", "**/*.key", "**/secrets/**"]
+
+# Replace file paths in stored memories with generic placeholders.
+# Useful if your project paths contain sensitive directory names.
 # anonymize_paths = false
 
 [context]
+# Maximum tokens for the context string returned by `get_project_context`
+# MCP tool and `poneglyph context` CLI. This is the budget for session-start
+# injection — higher = more context, more tokens consumed per session.
 # max_tokens = 2000
 
 [enrichment]
+# LLM-powered background enrichment: summarize, extract entities/relations,
+# score importance. Requires [llm] to be enabled. Runs as async jobs.
 # enabled = false
 
 [decay]
+# Ebbinghaus forgetting-curve simulation: memories lose strength over time
+# unless recalled. Prevents stale memories from dominating retrieval.
 # enabled = true
+
+# Minimum strength before a memory is considered "forgotten" (still stored,
+# but ranked very low in retrieval). 0.1 = nearly forgotten.
 # min_strength = 0.1
+
+# Strength threshold below which memories become candidates for consolidation
+# (merging into decoy cluster summaries). 0.3 = moderately faded.
 # consolidation_threshold = 0.3
+
+# How much strength decays per day without access. 0.02 = ~2%/day.
+# After 30 days without recall, a memory at 1.0 drops to ~0.55.
 # daily_decay_rate = 0.02
 
 [consolidation]
+# Merge related memories into cluster summaries ("decoy" memories) to reduce
+# noise and compress context. Uses embedding similarity for clustering.
 # enabled = true
+
+# How often (hours) to run the consolidation pass. 6h = 4x/day.
 # interval_hours = 6
+
+# Minimum memories in a cluster before a decoy summary is created.
+# 2 = even pairs get merged; 3+ = only larger clusters.
 # min_cluster_size = 2
+
+# Minimum embedding cosine similarity for two memories to be in the same
+# cluster. Higher = tighter clusters, fewer merges. 0.75 is conservative.
 # similarity_threshold = 0.75
 
 [cold_storage]
+# Compress old memories to zstd files on disk, freeing SQLite space.
+# Cold memories are still searchable (decompressed on demand) but slower.
 # enabled = true
+
+# zstd compression level (1–22). Higher = smaller files, slower compress.
+# 3 is fast with good ratio (~60% size reduction on prose).
 # compress_level = 3
 "#
     )
@@ -613,13 +922,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
 
-        let changed1 = merge_json_mcp_server(&path, "mcpServers", true, "/usr/local/bin/poneglyph").unwrap();
+        let changed1 =
+            merge_json_mcp_server(&path, "mcpServers", true, "/usr/local/bin/poneglyph").unwrap();
         assert!(changed1);
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["mcpServers"]["poneglyph"]["command"], "/usr/local/bin/poneglyph");
+        assert_eq!(
+            v["mcpServers"]["poneglyph"]["command"],
+            "/usr/local/bin/poneglyph"
+        );
         assert_eq!(v["mcpServers"]["poneglyph"]["type"], "stdio");
 
-        let changed2 = merge_json_mcp_server(&path, "mcpServers", true, "/usr/local/bin/poneglyph").unwrap();
+        let changed2 =
+            merge_json_mcp_server(&path, "mcpServers", true, "/usr/local/bin/poneglyph").unwrap();
         assert!(!changed2, "second merge must be a no-op");
     }
 
@@ -627,7 +941,11 @@ mod tests {
     fn merge_json_mcp_server_preserves_existing_unrelated_keys() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        std::fs::write(&path, r#"{"mcpServers": {"other-tool": {"command": "other"}}, "unrelated": 1}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers": {"other-tool": {"command": "other"}}, "unrelated": 1}"#,
+        )
+        .unwrap();
 
         merge_json_mcp_server(&path, "mcpServers", true, "poneglyph").unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -670,7 +988,10 @@ mod tests {
         let skills_dir = dir.path().join("skills");
         assert!(install_opencode_skill(&skills_dir).unwrap());
         assert!(skills_dir.join("poneglyph/SKILL.md").exists());
-        assert!(!install_opencode_skill(&skills_dir).unwrap(), "unchanged content must be a no-op");
+        assert!(
+            !install_opencode_skill(&skills_dir).unwrap(),
+            "unchanged content must be a no-op"
+        );
     }
 
     #[test]
@@ -681,17 +1002,30 @@ mod tests {
 
         let changed1 = merge_claude_code_hooks(&settings_path, &hooks_dir).unwrap();
         assert!(changed1);
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
         for event in ["PostToolUse", "UserPromptSubmit", "Stop", "SessionStart"] {
-            assert_eq!(v["hooks"][event].as_array().unwrap().len(), 1, "event {event}");
+            assert_eq!(
+                v["hooks"][event].as_array().unwrap().len(),
+                1,
+                "event {event}"
+            );
         }
-        assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "Edit|Write|MultiEdit|Bash|NotebookEdit|Agent|Task");
+        assert_eq!(
+            v["hooks"]["PostToolUse"][0]["matcher"],
+            "Edit|Write|MultiEdit|Bash|NotebookEdit|Agent|Task"
+        );
         assert!(v["hooks"]["Stop"][0].get("matcher").is_none());
 
         let changed2 = merge_claude_code_hooks(&settings_path, &hooks_dir).unwrap();
         assert!(!changed2, "second merge must be a no-op");
-        let v2: Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-        assert_eq!(v2["hooks"]["PostToolUse"].as_array().unwrap().len(), 1, "must not duplicate entries");
+        let v2: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            v2["hooks"]["PostToolUse"].as_array().unwrap().len(),
+            1,
+            "must not duplicate entries"
+        );
     }
 
     #[test]
@@ -705,8 +1039,13 @@ mod tests {
         .unwrap();
 
         merge_claude_code_hooks(&settings_path, &dir.path().join("hooks")).unwrap();
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-        assert_eq!(v["hooks"]["PostToolUse"].as_array().unwrap().len(), 2, "must keep the pre-existing entry");
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            v["hooks"]["PostToolUse"].as_array().unwrap().len(),
+            2,
+            "must keep the pre-existing entry"
+        );
     }
 
     #[cfg(feature = "codex")]
@@ -718,8 +1057,14 @@ mod tests {
         let changed1 = merge_codex_mcp_server(&path, "poneglyph").unwrap();
         assert!(changed1);
         let v: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
-        assert_eq!(v["mcp_servers"]["poneglyph"]["command"].as_str(), Some("poneglyph"));
-        assert_eq!(v["mcp_servers"]["poneglyph"]["args"][0].as_str(), Some("mcp"));
+        assert_eq!(
+            v["mcp_servers"]["poneglyph"]["command"].as_str(),
+            Some("poneglyph")
+        );
+        assert_eq!(
+            v["mcp_servers"]["poneglyph"]["args"][0].as_str(),
+            Some("mcp")
+        );
 
         let changed2 = merge_codex_mcp_server(&path, "poneglyph").unwrap();
         assert!(!changed2, "second merge must be a no-op");
@@ -735,7 +1080,10 @@ mod tests {
         merge_codex_mcp_server(&path, "poneglyph").unwrap();
         let v: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         assert_eq!(v["mcp_servers"]["other"]["command"].as_str(), Some("other"));
-        assert_eq!(v["mcp_servers"]["poneglyph"]["command"].as_str(), Some("poneglyph"));
+        assert_eq!(
+            v["mcp_servers"]["poneglyph"]["command"].as_str(),
+            Some("poneglyph")
+        );
     }
 
     #[test]
@@ -743,7 +1091,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let hooks_dir = dir.path().join("hooks");
         install_hook_scripts(&hooks_dir).unwrap();
-        for name in ["posttooluse.sh", "userpromptsubmit.sh", "stop.sh", "sessionstart.sh"] {
+        for name in [
+            "posttooluse.sh",
+            "userpromptsubmit.sh",
+            "stop.sh",
+            "sessionstart.sh",
+        ] {
             let path = hooks_dir.join(name);
             assert!(path.exists());
             #[cfg(unix)]
@@ -761,7 +1114,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let plugin_dir = dir.path().join("plugins");
         assert!(install_opencode_plugin(&plugin_dir).unwrap());
-        assert!(!install_opencode_plugin(&plugin_dir).unwrap(), "unchanged content must be a no-op");
+        assert!(
+            !install_opencode_plugin(&plugin_dir).unwrap(),
+            "unchanged content must be a no-op"
+        );
     }
 
     #[test]
@@ -770,7 +1126,10 @@ mod tests {
         let skills_dir = dir.path().join("skills");
         assert!(install_skill_file(&skills_dir).unwrap());
         assert!(skills_dir.join("poneglyph/SKILL.md").exists());
-        assert!(!install_skill_file(&skills_dir).unwrap(), "unchanged content must be a no-op");
+        assert!(
+            !install_skill_file(&skills_dir).unwrap(),
+            "unchanged content must be a no-op"
+        );
     }
 
     #[test]
@@ -785,28 +1144,41 @@ mod tests {
 
     #[test]
     fn render_config_template_uncomments_detected_llm_provider() {
-        let detected = Detected { llm_provider: Some("ollama"), llm_base_url: Some("http://localhost:11434/v1") };
+        let detected = Detected {
+            llm_provider: Some("ollama"),
+            llm_base_url: Some("http://localhost:11434/v1"),
+        };
         let toml = render_config_template(&detected);
         assert!(toml.contains("provider = \"ollama\""));
         assert!(toml.contains("enabled = true"));
         // Every other section stays commented.
         assert!(toml.contains("# port = 3742"));
-        let parsed: toml::Table = toml.parse().expect("template (minus comments) must be valid TOML");
+        let parsed: toml::Table = toml
+            .parse()
+            .expect("template (minus comments) must be valid TOML");
         assert!(parsed.contains_key("llm"));
     }
 
     #[test]
     fn render_config_template_comments_llm_when_nothing_detected() {
-        let detected = Detected { llm_provider: None, llm_base_url: None };
+        let detected = Detected {
+            llm_provider: None,
+            llm_base_url: None,
+        };
         let toml = render_config_template(&detected);
         assert!(toml.contains("# enabled = false"));
         assert!(!toml.contains("\nenabled = true"));
-        let _: toml::Table = toml.parse().expect("fully-commented template must still be valid TOML");
+        let _: toml::Table = toml
+            .parse()
+            .expect("fully-commented template must still be valid TOML");
     }
 
     #[test]
     fn render_config_template_uses_default_model() {
-        let detected = Detected { llm_provider: None, llm_base_url: None };
+        let detected = Detected {
+            llm_provider: None,
+            llm_base_url: None,
+        };
         let toml = render_config_template(&detected);
         assert!(toml.contains("model_id = \"sentence-transformers/all-MiniLM-L6-v2\""));
         assert!(toml.contains("\ndimensions = 384"));
@@ -817,16 +1189,26 @@ mod tests {
     #[test]
     fn inject_agent_rules_only_touches_existing_files() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("CLAUDE.md"), "# My project\n\nSome existing notes.\n").unwrap();
+        std::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "# My project\n\nSome existing notes.\n",
+        )
+        .unwrap();
         // AGENTS.md and .cursorrules deliberately absent.
 
         let results = inject_agent_rules(dir.path()).unwrap();
         assert_eq!(results, vec![("CLAUDE.md".to_string(), true)]);
-        assert!(!dir.path().join("AGENTS.md").exists(), "must never create files the user doesn't have");
+        assert!(
+            !dir.path().join("AGENTS.md").exists(),
+            "must never create files the user doesn't have"
+        );
         assert!(!dir.path().join(".cursorrules").exists());
 
         let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
-        assert!(content.contains("Some existing notes."), "must preserve existing content");
+        assert!(
+            content.contains("Some existing notes."),
+            "must preserve existing content"
+        );
         assert!(content.contains(RULES_START) && content.contains(RULES_END));
     }
 
@@ -836,11 +1218,17 @@ mod tests {
         let path = dir.path().join("AGENTS.md");
         std::fs::write(&path, "# Agents\n\nBefore.\n\nAfter.\n").unwrap();
 
-        assert!(inject_rules_block(&path).unwrap(), "first call inserts the block");
+        assert!(
+            inject_rules_block(&path).unwrap(),
+            "first call inserts the block"
+        );
         let first = std::fs::read_to_string(&path).unwrap();
         assert!(first.contains("Before.") && first.contains("After."));
 
-        assert!(!inject_rules_block(&path).unwrap(), "second call on unchanged content is a no-op");
+        assert!(
+            !inject_rules_block(&path).unwrap(),
+            "second call on unchanged content is a no-op"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
 
         // Editing the block content (e.g. a future SKILL.md change) replaces
@@ -849,7 +1237,11 @@ mod tests {
         std::fs::write(&path, &edited).unwrap();
         assert!(inject_rules_block(&path).unwrap());
         let after = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(after.matches(RULES_START).count(), 1, "must not duplicate the block");
+        assert_eq!(
+            after.matches(RULES_START).count(),
+            1,
+            "must not duplicate the block"
+        );
         assert!(!after.contains("stale"));
     }
 

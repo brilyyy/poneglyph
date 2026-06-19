@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 authors = ["Brilyan"]
 license = "MIT"
@@ -94,6 +94,16 @@ tree-sitter-typescript = { version = "0.23" }
 tree-sitter-javascript = { version = "0.23" }
 tree-sitter-python     = { version = "0.23" }
 tree-sitter-go         = { version = "0.23" }
+tree-sitter-c          = { version = "0.24" }
+tree-sitter-cpp        = { version = "0.23" }
+tree-sitter-java       = { version = "0.23" }
+tree-sitter-c-sharp    = { version = "0.23" }
+tree-sitter-php        = { version = "0.24" }
+tree-sitter-ruby       = { version = "0.23" }
+tree-sitter-kotlin-ng   = { version = "1.1" }
+tree-sitter-swift      = { version = "0.7" }
+tree-sitter-bash       = { version = "0.25" }
+tree-sitter-scala      = { version = "0.26" }
 notify                 = { version = "6" }
 ignore                 = { version = "0.4" }
 rayon                  = { version = "1" }

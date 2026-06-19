@@ -5,7 +5,7 @@
 //!
 //! Deliberately a manual recursive walk over `Node`/`child_by_field_name`
 //! rather than the `Query` DSL: one walker plus a per-language kind table
-//! covers 5 grammars without juggling 5 sets of S-expression patterns.
+//! covers 15 grammars without juggling 15 sets of S-expression patterns.
 
 use anyhow::{Result, bail};
 use tree_sitter::{Language, Node, Parser};
@@ -56,6 +56,36 @@ fn lang_python() -> Language {
 }
 fn lang_go() -> Language {
     tree_sitter_go::LANGUAGE.into()
+}
+fn lang_c() -> Language {
+    tree_sitter_c::LANGUAGE.into()
+}
+fn lang_cpp() -> Language {
+    tree_sitter_cpp::LANGUAGE.into()
+}
+fn lang_java() -> Language {
+    tree_sitter_java::LANGUAGE.into()
+}
+fn lang_csharp() -> Language {
+    tree_sitter_c_sharp::LANGUAGE.into()
+}
+fn lang_php() -> Language {
+    tree_sitter_php::LANGUAGE_PHP.into()
+}
+fn lang_ruby() -> Language {
+    tree_sitter_ruby::LANGUAGE.into()
+}
+fn lang_kotlin() -> Language {
+    tree_sitter_kotlin_ng::LANGUAGE.into()
+}
+fn lang_swift() -> Language {
+    tree_sitter_swift::LANGUAGE.into()
+}
+fn lang_bash() -> Language {
+    tree_sitter_bash::LANGUAGE.into()
+}
+fn lang_scala() -> Language {
+    tree_sitter_scala::LANGUAGE.into()
 }
 
 static LANGS: &[LangEntry] = &[
@@ -110,6 +140,116 @@ static LANGS: &[LangEntry] = &[
         spec: LangSpec {
             function_kinds: &["function_declaration", "method_declaration"],
             type_kinds: &["type_spec"],
+            import_kinds: &["import_declaration"],
+            call_kinds: &["call_expression"],
+        },
+    },
+    LangEntry {
+        name: "c",
+        extensions: &["c", "h"],
+        grammar: lang_c,
+        spec: LangSpec {
+            function_kinds: &["function_definition"],
+            type_kinds: &["struct_specifier", "enum_specifier", "type_definition"],
+            import_kinds: &["preproc_include"],
+            call_kinds: &["call_expression"],
+        },
+    },
+    LangEntry {
+        name: "cpp",
+        extensions: &["cpp", "cc", "cxx", "hpp", "hxx", "hh"],
+        grammar: lang_cpp,
+        spec: LangSpec {
+            function_kinds: &["function_definition"],
+            type_kinds: &["struct_specifier", "enum_specifier", "class_specifier", "type_definition"],
+            import_kinds: &["preproc_include", "using_declaration"],
+            call_kinds: &["call_expression"],
+        },
+    },
+    LangEntry {
+        name: "java",
+        extensions: &["java"],
+        grammar: lang_java,
+        spec: LangSpec {
+            function_kinds: &["method_declaration", "constructor_declaration"],
+            type_kinds: &["class_declaration", "interface_declaration", "enum_declaration"],
+            import_kinds: &["import_declaration"],
+            call_kinds: &["method_invocation", "object_creation_expression"],
+        },
+    },
+    LangEntry {
+        name: "csharp",
+        extensions: &["cs"],
+        grammar: lang_csharp,
+        spec: LangSpec {
+            function_kinds: &["method_declaration", "constructor_declaration"],
+            type_kinds: &["class_declaration", "interface_declaration", "struct_declaration", "enum_declaration"],
+            import_kinds: &["using_directive"],
+            call_kinds: &["invocation_expression", "object_creation_expression"],
+        },
+    },
+    LangEntry {
+        name: "php",
+        extensions: &["php"],
+        grammar: lang_php,
+        spec: LangSpec {
+            function_kinds: &["function_definition", "method_declaration"],
+            type_kinds: &["class_declaration", "interface_declaration", "enum_declaration"],
+            import_kinds: &["namespace_use_declaration"],
+            call_kinds: &["function_call_expression", "member_call_expression"],
+        },
+    },
+    LangEntry {
+        name: "ruby",
+        extensions: &["rb"],
+        grammar: lang_ruby,
+        spec: LangSpec {
+            function_kinds: &["method", "singleton_method"],
+            type_kinds: &["class", "module"],
+            import_kinds: &["call"],  // require/require_relative are calls
+            call_kinds: &["call", "method_call"],
+        },
+    },
+    LangEntry {
+        name: "kotlin",
+        extensions: &["kt", "kts"],
+        grammar: lang_kotlin,
+        spec: LangSpec {
+            function_kinds: &["function_declaration"],
+            type_kinds: &["class_declaration", "interface_declaration", "object_declaration", "enum_declaration"],
+            import_kinds: &["import_header"],
+            call_kinds: &["call_expression"],
+        },
+    },
+    LangEntry {
+        name: "swift",
+        extensions: &["swift"],
+        grammar: lang_swift,
+        spec: LangSpec {
+            function_kinds: &["function_declaration"],
+            type_kinds: &["class_declaration", "struct_declaration", "protocol_declaration", "enum_declaration"],
+            import_kinds: &["import_declaration"],
+            call_kinds: &["call_expression"],
+        },
+    },
+    LangEntry {
+        name: "bash",
+        extensions: &["sh", "bash", "zsh"],
+        grammar: lang_bash,
+        spec: LangSpec {
+            function_kinds: &["function_definition"],
+            type_kinds: &[],
+            import_kinds: &[],
+            call_kinds: &["command_name"],
+        },
+    },
+    LangEntry {
+        name: "scala",
+        extensions: &["scala", "sc"],
+        grammar: lang_scala,
+        spec: LangSpec {
+            function_kinds: &["function_definition", "val_definition"],
+            type_kinds: &["class_definition", "trait_definition", "object_definition"],
             import_kinds: &["import_declaration"],
             call_kinds: &["call_expression"],
         },
@@ -184,8 +324,23 @@ fn guess_test_target(language: &str, test_name: &str) -> Option<String> {
     match language {
         "python" => test_name.strip_prefix("test_").map(str::to_string),
         "go" => test_name.strip_prefix("Test").map(str::to_string),
+        "java" | "kotlin" | "swift" => test_name.strip_prefix("test").map(str::to_string),
+        "php" => test_name.strip_prefix("test").map(str::to_string),
+        "ruby" => test_name.strip_prefix("test_").map(str::to_string),
         _ => None,
     }
+}
+
+fn is_csharp_test_fn(n: Node, source: &str) -> bool {
+    // C# tests have [Test] or [Fact] or [Theory] attribute on the previous sibling
+    let mut cursor = n.walk();
+    for child in n.parent().map(|p| p.children(&mut cursor).collect::<Vec<_>>()).unwrap_or_default() {
+        if child.id() == n.id() { break; }
+        if child.kind() == "attribute_list" && text(child, source).contains("Test") {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_rust_test_fn(n: Node, source: &str) -> bool {
@@ -201,14 +356,20 @@ fn walk(n: Node, source: &str, path: &str, language: &str, spec: &LangSpec, out:
             let name = text(name_node, source).to_string();
             let is_method = n
                 .parent()
-                .map(|p| p.kind() == "declaration_list" || p.kind() == "class_body" || kind == "method_definition" || kind == "method_declaration")
+                .map(|p| {
+                    let pk = p.kind();
+                    pk == "declaration_list" || pk == "class_body" || pk == "class" || pk == "interface_body" || pk == "struct_body"
+                        || kind == "method_definition" || kind == "method_declaration" || kind == "constructor_declaration"
+                        || kind == "singleton_method"
+                })
                 .unwrap_or(false);
             let node_kind = if is_method { CgNodeKind::Method } else { CgNodeKind::Function };
             let cg = make_node(path, node_kind, &name, n);
 
             let is_test = match language {
                 "rust" => is_rust_test_fn(n, source),
-                "python" | "go" => guess_test_target(language, &name).is_some(),
+                "python" | "go" | "java" | "kotlin" | "swift" | "php" | "ruby" => guess_test_target(language, &name).is_some(),
+                "csharp" => is_csharp_test_fn(n, source),
                 _ => false,
             };
             if is_test {
@@ -339,16 +500,27 @@ fn test_helper() {
 
     #[test]
     fn unsupported_language_errors() {
-        assert!(parse_file("x.rb", "ruby", "puts 1").is_err());
+        assert!(parse_file("x.lua", "lua", "print('hi')").is_err());
     }
 
     #[test]
-    fn language_for_extension_covers_all_five() {
+    fn language_for_extension_covers_all_fifteen() {
         assert_eq!(language_for_extension("rs"), Some("rust"));
         assert_eq!(language_for_extension("ts"), Some("typescript"));
         assert_eq!(language_for_extension("js"), Some("javascript"));
         assert_eq!(language_for_extension("py"), Some("python"));
         assert_eq!(language_for_extension("go"), Some("go"));
-        assert_eq!(language_for_extension("rb"), None);
+        assert_eq!(language_for_extension("c"), Some("c"));
+        assert_eq!(language_for_extension("h"), Some("c"));
+        assert_eq!(language_for_extension("cpp"), Some("cpp"));
+        assert_eq!(language_for_extension("java"), Some("java"));
+        assert_eq!(language_for_extension("cs"), Some("csharp"));
+        assert_eq!(language_for_extension("php"), Some("php"));
+        assert_eq!(language_for_extension("rb"), Some("ruby"));
+        assert_eq!(language_for_extension("kt"), Some("kotlin"));
+        assert_eq!(language_for_extension("swift"), Some("swift"));
+        assert_eq!(language_for_extension("sh"), Some("bash"));
+        assert_eq!(language_for_extension("scala"), Some("scala"));
+        assert_eq!(language_for_extension("xyz"), None);
     }
 }

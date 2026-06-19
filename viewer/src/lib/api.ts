@@ -91,6 +91,9 @@ export const api = {
 
   context: (params: { project_path: string; max_tokens?: number }) =>
     request<ProjectContext>(`/api/context${qs(params)}`),
+
+  sessionSummary: (params: { project_path?: string }) =>
+    request<{ content: string; created_at: string; id: string } | null>(`/api/session-summary${qs(params)}`),
 }
 
 export function formatDate(iso: string | null): string {

@@ -237,6 +237,16 @@ impl Default for CodeGraphConfig {
                 "javascript".into(),
                 "python".into(),
                 "go".into(),
+                "c".into(),
+                "cpp".into(),
+                "java".into(),
+                "csharp".into(),
+                "php".into(),
+                "ruby".into(),
+                "kotlin".into(),
+                "swift".into(),
+                "bash".into(),
+                "scala".into(),
             ],
             exclude_patterns: vec![
                 "**/target/**".into(),
@@ -786,7 +796,7 @@ mod tests {
         assert_eq!(cfg.decay.min_strength, 0.1);
         assert_eq!(cfg.consolidation.similarity_threshold, 0.75);
         assert_eq!(cfg.cold_storage.compress_level, 3);
-        assert_eq!(cfg.graph.languages.len(), 5);
+        assert_eq!(cfg.graph.languages.len(), 15);
         assert_eq!(cfg.memory.layer_retention.long_term, 180);
     }
 
@@ -885,7 +895,7 @@ mod tests {
         assert_eq!(cfg.memory.edges.temporal_window_secs, 99);
         // New code-graph defaults untouched.
         assert!(cfg.graph.enabled);
-        assert_eq!(cfg.graph.languages.len(), 5);
+        assert_eq!(cfg.graph.languages.len(), 15);
     }
 
     #[test]

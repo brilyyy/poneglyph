@@ -73,6 +73,11 @@ function TimelinePage() {
       }),
   })
 
+  const summary = useQuery({
+    queryKey: ['session-summary', search.project],
+    queryFn: () => api.sessionSummary({ project_path: search.project }),
+  })
+
   const sessions = timeline.data?.sessions ?? []
   const total = timeline.data?.total ?? 0
   const hasMore = offset + sessions.length < total
@@ -85,6 +90,14 @@ function TimelinePage() {
           {total} session{total !== 1 ? 's' : ''}
         </span>
       </div>
+
+      {summary.data && (
+        <div className="rounded-md border border-border/50 bg-card/50 p-3">
+          <p className="mb-1 text-xs font-medium text-muted-foreground">Last session summary</p>
+          <p className="text-sm whitespace-pre-wrap">{summary.data.content}</p>
+          <p className="mt-1 text-[10px] text-muted-foreground">{formatRelative(summary.data.created_at)}</p>
+        </div>
+      )}
 
       <div className="flex gap-2">
         <Select

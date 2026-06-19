@@ -202,15 +202,77 @@ if [[ "$NO_INIT" == false ]]; then
   ok "Config, database, and model cache directories created"
 fi
 
+# ── feature selection ────────────────────────────────────────────────────────
+prompt_features() {
+  hdr "Choose features to set up"
+  echo "Select which features to enable (space-separated numbers, Enter for all):"
+  echo ""
+  echo "  1) Claude Code hooks    — auto-capture prompts, responses, tool usage"
+  echo "  2) OpenCode plugin      — same capture for OpenCode editor"
+  echo "  3) MCP server           — memory/codegraph tools for any MCP client"
+  echo "  4) Web dashboard        — browser UI for browsing memories & graph"
+  echo ""
+  echo -n "Selection [1 2 3 4]: "
+  read -r selection
+
+  # Default: all features
+  if [[ -z "$selection" ]]; then
+    selection="1 2 3 4"
+  fi
+
+  FEATURES_CLAUDE=false
+  FEATURES_OPENCODE=false
+  FEATURES_MCP=false
+  FEATURES_VIEWER=false
+
+  for num in $selection; do
+    case "$num" in
+      1) FEATURES_CLAUDE=true ;;
+      2) FEATURES_OPENCODE=true ;;
+      3) FEATURES_MCP=true ;;
+      4) FEATURES_VIEWER=true ;;
+      *) warn "Unknown option: $num (skipping)" ;;
+    esac
+  done
+}
+
+if [[ "$YES" == true ]]; then
+  FEATURES_CLAUDE=true
+  FEATURES_OPENCODE=true
+  FEATURES_MCP=true
+  FEATURES_VIEWER=true
+else
+  prompt_features
+fi
+
+# ── wire features ───────────────────────────────────────────────────────────
+if [[ "$FEATURES_CLAUDE" == true ]]; then
+  hdr "Wiring Claude Code hooks"
+  "$INSTALL_PATH" wire claude-code 2>/dev/null && ok "Claude Code hooks installed" || warn "Could not wire Claude Code (may need manual setup)"
+fi
+
+if [[ "$FEATURES_OPENCODE" == true ]]; then
+  hdr "Wiring OpenCode plugin"
+  "$INSTALL_PATH" wire opencode 2>/dev/null && ok "OpenCode plugin installed" || warn "Could not wire OpenCode (may need manual setup)"
+fi
+
+if [[ "$FEATURES_MCP" == true ]]; then
+  echo ""
+  echo "To start the MCP server:"
+  echo "  poneglyph mcp"
+  echo ""
+  echo "Add to your MCP client config:"
+  echo '  "poneglyph": { "command": "poneglyph", "args": ["mcp"] }'
+fi
+
+if [[ "$FEATURES_VIEWER" == true ]]; then
+  echo ""
+  echo "To start the web dashboard:"
+  echo "  poneglyph viewer"
+fi
+
 # ── done ──────────────────────────────────────────────────────────────────────
 hdr "Done"
 ok "poneglyph $("$INSTALL_PATH" --version 2>&1 | head -1)"
-echo ""
-echo "Next steps:"
-echo "  poneglyph wire claude-code  # wire up Claude Code"
-echo "  poneglyph wire opencode     # wire up OpenCode"
-echo "  poneglyph mcp               # start MCP server"
-echo "  poneglyph viewer            # start web dashboard"
-echo "  poneglyph --help            # all commands"
 echo ""
 echo "Docs: docs/INTEGRATIONS.md (Claude Code, Claude Desktop, OpenCode)"

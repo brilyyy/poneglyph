@@ -14,4 +14,12 @@ fi
 
 poneglyph context --project "$CWD" --max-tokens "$TOKENS" 2>/dev/null || exit 0
 
+# Show last session summary if available.
+SUMMARY=$(poneglyph session-summary --latest --project "$CWD" 2>/dev/null) || true
+if [ -n "$SUMMARY" ]; then
+  echo ""
+  echo "## Last session summary"
+  echo "$SUMMARY"
+fi
+
 exit 0  # always succeed — never block session start
