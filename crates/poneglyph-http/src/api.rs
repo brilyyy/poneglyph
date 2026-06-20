@@ -357,6 +357,39 @@ pub async fn agents_status(State(state): State<AppState>) -> ApiResult<Value> {
 }
 
 // ---------------------------------------------------------------------------
+// /api/services-status — MCP engine / LLM / viewer up-down for the status
+// panel. All three probes run server-side so the browser only ever talks to
+// its own origin (avoids CORS to the engine port or the LLM's host).
+// ---------------------------------------------------------------------------
+
+pub async fn services_status(State(state): State<AppState>) -> ApiResult<Value> {
+    let config = &state.config;
+
+    let mcp_port = config.agents.mcp_server_port;
+    let mcp_up = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{mcp_port}/health"))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success());
+
+    let llm = poneglyph_core::llm::health(&config.llm).await;
+
+    Ok(Json(json!({
+        "mcp": { "up": mcp_up, "port": mcp_port },
+        "llm": {
+            "enabled": config.llm.enabled,
+            "up": llm.reachable,
+            "provider": config.llm.provider,
+            "model": config.llm.model,
+            "base_url": config.llm.base_url,
+            "status": llm.status,
+        },
+        "viewer": { "up": true, "port": config.dashboard.port },
+    })))
+}
+
+// ---------------------------------------------------------------------------
 // /api/context — zero-LLM session context injection (PRD §8.10)
 // ---------------------------------------------------------------------------
 

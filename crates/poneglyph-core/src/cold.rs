@@ -1,7 +1,7 @@
 //! Cold storage — zstd-compressed memory files for the cold tier.
 //!
 //! When a memory is moved to cold tier, its content is compressed to a `.zst`
-//! file under `~/.local/share/poneglyph/cold/{project_id}/{memory_id}.zst`.
+//! file under `~/.config/poneglyph/data/cold/{project_id}/{memory_id}.zst`.
 //! The memory row keeps a `cold_path` pointer for lazy decompression.
 
 use anyhow::{Context, Result};

@@ -20,7 +20,10 @@ copilot     = []
 all-agents  = ["cursor", "gemini", "opencode", "codex", "copilot"]
 
 # Compile the built web viewer into the binary (see scripts/build-release.sh).
-viewer = ["dep:poneglyph-http", "poneglyph-http/embed-viewer"]
+# poneglyph-http itself is always linked now — `mcp` serves /api + /ingest
+# off the same engine process; this only toggles embedding the SPA assets
+# and the `poneglyph viewer` subcommand.
+viewer = ["poneglyph-http/embed-viewer"]
 
 # LLM-backed enrichment/compression is opt-in per provider — none compiled
 # in by default. `llm-all` is a convenience bundle of all three.
@@ -32,7 +35,8 @@ llm-all       = ["llm-openai", "llm-anthropic", "llm-gemini"]
 [dependencies]
 poneglyph-core = { workspace = true }
 poneglyph-mcp  = { workspace = true }
-poneglyph-http = { workspace = true, optional = true }
+poneglyph-http = { workspace = true }
+axum           = { workspace = true }
 tokio          = { workspace = true }
 clap           = { workspace = true }
 figment        = { workspace = true }

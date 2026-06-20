@@ -74,7 +74,7 @@ supported automatically. You would need to:
 Before upgrading to a future version, back up the database:
 
 ```sh
-cp ~/.local/share/poneglyph/poneglyph.db ~/.local/share/poneglyph/poneglyph.db.bak
+cp ~/.config/poneglyph/data/poneglyph.db ~/.config/poneglyph/data/poneglyph.db.bak
 ```
 
 The WAL journal files (`.db-wal`, `.db-shm`) should also be copied if present.

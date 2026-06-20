@@ -189,3 +189,16 @@ export type AgentsStatus = Record<
   'claude_code' | 'cursor' | 'gemini_cli' | 'opencode' | 'codex' | 'copilot_cli',
   AgentStatusEntry
 >
+
+export interface ServicesStatus {
+  mcp: { up: boolean; port: number }
+  llm: {
+    enabled: boolean
+    up: boolean
+    provider: string
+    model: string | null
+    base_url: string | null
+    status: string | null
+  }
+  viewer: { up: boolean; port: number }
+}

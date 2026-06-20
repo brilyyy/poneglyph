@@ -61,15 +61,18 @@ fi
 ok "Removed: $INSTALL_PATH"
 
 # ── data directories ──────────────────────────────────────────────────────────
+# Data lives under CONFIG_DIR (.config/poneglyph/data) as of v1.1.0; the
+# .local/share path is kept here too in case it's a pre-1.1.0 install that
+# never moved.
 CONFIG_DIR="$HOME/.config/poneglyph"
-DATA_DIR="$HOME/.local/share/poneglyph"
+LEGACY_DATA_DIR="$HOME/.local/share/poneglyph"
 CACHE_DIR="$HOME/.cache/poneglyph"
 
 if [[ "$PURGE" == false && "$YES" == false ]]; then
   hdr "Data directories"
-  echo "  Config:  $CONFIG_DIR"
-  echo "  Data:    $DATA_DIR"
-  echo "  Cache:   $CACHE_DIR"
+  echo "  Config + data:  $CONFIG_DIR"
+  echo "  Legacy data:    $LEGACY_DATA_DIR (if present)"
+  echo "  Cache:          $CACHE_DIR"
   echo ""
   warn "These contain your memories, config, and downloaded model (~30MB)."
   read -r -p "Remove all data? [y/N] " reply
@@ -85,9 +88,9 @@ if [[ "$PURGE" == true ]]; then
     [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Purge cancelled."; exit 0; }
   fi
 
-  [[ -d "$CONFIG_DIR" ]] && rm -rf "$CONFIG_DIR" && ok "Removed: $CONFIG_DIR"
-  [[ -d "$DATA_DIR"   ]] && rm -rf "$DATA_DIR"   && ok "Removed: $DATA_DIR"
-  [[ -d "$CACHE_DIR"  ]] && rm -rf "$CACHE_DIR"  && ok "Removed: $CACHE_DIR"
+  [[ -d "$CONFIG_DIR"      ]] && rm -rf "$CONFIG_DIR"      && ok "Removed: $CONFIG_DIR"
+  [[ -d "$LEGACY_DATA_DIR" ]] && rm -rf "$LEGACY_DATA_DIR" && ok "Removed: $LEGACY_DATA_DIR"
+  [[ -d "$CACHE_DIR"       ]] && rm -rf "$CACHE_DIR"       && ok "Removed: $CACHE_DIR"
 fi
 
 # ── done ──────────────────────────────────────────────────────────────────────

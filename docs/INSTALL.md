@@ -46,7 +46,8 @@ cargo build --release --features llm-anthropic   # or llm-openai, llm-gemini, ll
 # Create database + default config
 poneglyph init
 
-# Start the MCP server (for your editor/agent)
+# Start the MCP server (HTTP, default port 27271 — keep this running;
+# editors/agents connect over the network rather than spawning it per-session)
 poneglyph mcp
 
 # Start the web dashboard + graph viewer (separate process)
@@ -55,7 +56,7 @@ poneglyph viewer
 
 `poneglyph init` creates:
 - Config: `~/.config/poneglyph/config.toml`
-- Database: `~/.local/share/poneglyph/poneglyph.db`
+- Database: `~/.config/poneglyph/data/poneglyph.db`
 - Model cache: `~/.cache/poneglyph/models/`
 - Project-local: `.poneglyphignore` and `.poneglyph/code-graph-lock.json`
 
@@ -116,9 +117,12 @@ fallback automatically; it never blocks `remember`.
 See [COMPRESSION.md](COMPRESSION.md) for `[memory]` compression detail and
 [CODEGRAPH.md](CODEGRAPH.md) for `[graph]` and `.poneglyphignore`.
 
-Environment variables override config (prefix `PONEGLYPH_`):
-- `PONEGLYPH_PORT` — HTTP port (`poneglyph viewer`)
-- `PONEGLYPH_TOKEN` — API bearer token (required if non-loopback bind)
+Any config field can pull from the environment via `{ env.VAR }`
+interpolation in `config.toml` (e.g. `token = "{ env.PONEGLYPH_DASHBOARD_TOKEN }"`).
+The Claude Code hooks additionally read these directly (they don't load
+`config.toml`, just `curl` the engine):
+- `PONEGLYPH_PORT` — engine port the hooks `curl` (default `27271`, matches `agents.mcp_server_port`)
+- `PONEGLYPH_DASHBOARD_TOKEN` — bearer token, only needed if `dashboard.token` is set
 - `PONEGLYPH_CONTEXT_TOKENS` — SessionStart context budget (default 600)
 
 ## CLI commands
@@ -126,7 +130,7 @@ Environment variables override config (prefix `PONEGLYPH_`):
 | Command | Purpose |
 |---|---|
 | `poneglyph init` | Create db + default config |
-| `poneglyph mcp` | Start the MCP server (stdio) — editor/agent integration |
+| `poneglyph mcp` | Start the MCP server (HTTP on `agents.mcp_server_port`, default 27271; `--stdio` for the legacy per-process transport) — editor/agent integration |
 | `poneglyph viewer` | Start the web dashboard + graph viewer (HTTP), separate process |
 | `poneglyph remember "<text>"` | Store a memory |
 | `poneglyph recall "<query>"` | Search memories |

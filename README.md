@@ -46,8 +46,9 @@ instead of starting from zero every time.
   edit; no separate watch process to remember to run
 
 **Running it**
-- MCP server (`poneglyph mcp`) — 6 memory tools + 2 codegraph tools for
-  any MCP-aware client
+- MCP server (`poneglyph mcp`) — persistent HTTP daemon on `127.0.0.1:27271`
+  by default (`--stdio` for the legacy per-process transport); 6 memory
+  tools + 2 codegraph tools for any MCP-aware client
 - Web dashboard (`poneglyph viewer`) — GPU-rendered (WebGL) graph explorer
   that scales past what a DOM renderer can handle, plus search, timeline,
   and settings
@@ -114,7 +115,7 @@ open http://127.0.0.1:3742
 ```
 poneglyph-cli       ── clap binary (init, mcp, viewer, remember, recall, demo, ...)
 poneglyph-http      ── axum server (/ingest, /api/*, embedded viewer)
-poneglyph-mcp       ── rmcp stdio server (8 tools: memory + codegraph)
+poneglyph-mcp       ── rmcp server, HTTP by default (8 tools: memory + codegraph)
 poneglyph-core      ── store, embed, retrieve, graph, codegraph, compress, enrich, llm, config
 viewer/             ── TanStack Router + React SPA; graph views render via cosmos.gl (WebGL)
 hooks/claude-code/  ── bash hooks (posttooluse, userpromptsubmit, stop, sessionstart)

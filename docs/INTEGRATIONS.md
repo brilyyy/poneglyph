@@ -11,7 +11,9 @@ poneglyph wire claude-code
 ```
 
 This configures:
-- MCP server (`poneglyph mcp`) in `~/.claude.json`
+- MCP server registered as `http://127.0.0.1:27271/mcp` in `~/.claude.json`
+  — keep `poneglyph mcp` running (it's a persistent daemon, not
+  session-spawned)
 - Hooks in `~/.config/poneglyph/hooks/` and `~/.claude/settings.json`
 - Skill in `~/.claude/skills/poneglyph/SKILL.md`
 
@@ -81,16 +83,31 @@ poneglyph recall "recent work" --limit 5
 
 ## Claude Desktop (MCP)
 
-Claude Desktop connects to poneglyph via MCP stdio. Add to your Claude Desktop
-config (`~/Library/Application Support/Claude/claude_desktop_config.json` on
-macOS):
+`poneglyph mcp` runs as a persistent HTTP daemon on `127.0.0.1:27271` by
+default (configurable via `agents.mcp_server_port`) — start it once
+(`poneglyph mcp &`) and point clients at it by URL:
+
+```json
+{
+  "mcpServers": {
+    "poneglyph": {
+      "type": "http",
+      "url": "http://127.0.0.1:27271/mcp"
+    }
+  }
+}
+```
+
+Clients that only support spawning a stdio command (no remote MCP) can use
+the legacy escape hatch instead — `poneglyph mcp --stdio` skips the HTTP
+server and speaks JSON-RPC over stdio per-process, same as before 1.1.0:
 
 ```json
 {
   "mcpServers": {
     "poneglyph": {
       "command": "/path/to/poneglyph",
-      "args": ["mcp"]
+      "args": ["mcp", "--stdio"]
     }
   }
 }
@@ -123,4 +140,6 @@ Both codegraph tools require `poneglyph graph init` to have been run first
 - Hooks always exit 0 — a missing `poneglyph` binary never blocks your agent
 - Commands run in background (`&`) so they don't block the agent
 - Content truncated to 4000 chars
-- MCP server communicates over stdio (no network exposure)
+- MCP server binds `127.0.0.1` only (loopback, no network exposure) unless
+  you've explicitly reconfigured it; use `--stdio` to avoid binding a port
+  at all

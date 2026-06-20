@@ -27,6 +27,11 @@ function StatusPage() {
   const codegraphStats = useQuery({ queryKey: ['codegraph-stats'], queryFn: api.codegraphStats })
   const agents = useQuery({ queryKey: ['agents-status'], queryFn: api.agentsStatus })
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
+  const services = useQuery({
+    queryKey: ['services-status'],
+    queryFn: api.servicesStatus,
+    refetchInterval: 10_000,
+  })
 
   return (
     <div className="space-y-6">
@@ -37,6 +42,37 @@ function StatusPage() {
           <AlertDescription>{String(stats.error ?? agents.error ?? settings.error)}</AlertDescription>
         </Alert>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Services</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {services.isLoading ? (
+            <Spinner />
+          ) : services.data ? (
+            <ul className="divide-y divide-border text-sm">
+              <li className="flex items-center justify-between py-2">
+                <span>MCP engine (port {services.data.mcp.port})</span>
+                <UpBadge up={services.data.mcp.up} />
+              </li>
+              <li className="flex items-center justify-between py-2">
+                <span>
+                  LLM
+                  {services.data.llm.enabled
+                    ? ` (${services.data.llm.provider} · ${services.data.llm.model ?? '—'})`
+                    : ' (disabled)'}
+                </span>
+                <UpBadge up={services.data.llm.up} />
+              </li>
+              <li className="flex items-center justify-between py-2">
+                <span>Viewer (port {services.data.viewer.port})</span>
+                <UpBadge up={services.data.viewer.up} />
+              </li>
+            </ul>
+          ) : null}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -182,6 +218,10 @@ function StatCard({ label, value }: { label: string; value: number | undefined }
       </CardContent>
     </Card>
   )
+}
+
+function UpBadge({ up }: { up: boolean }) {
+  return <Badge variant={up ? 'default' : 'destructive'}>{up ? 'up' : 'down'}</Badge>
 }
 
 function Row({ label, value }: { label: string; value: string | number | undefined }) {

@@ -31,8 +31,15 @@ struct Cli {
 enum Command {
     /// Initialize database and config
     Init,
-    /// Start the MCP server (stdio) — for editor/agent integration
-    Mcp,
+    /// Start the MCP server — Streamable HTTP on `agents.mcp_server_port`
+    /// (default 27271) by default, a persistent daemon agents connect to
+    /// over the network. Also serves /api, /ingest, /healthz so hooks can
+    /// talk to one always-on process. Pass --stdio for the old
+    /// editor-spawned-per-session shape.
+    Mcp {
+        #[arg(long)]
+        stdio: bool,
+    },
     /// Start the web dashboard + graph viewer (HTTP) — for browsing in person
     #[cfg(feature = "viewer")]
     Viewer,
@@ -55,9 +62,7 @@ enum Command {
         limit: usize,
     },
     /// Delete a memory
-    Forget {
-        id: String,
-    },
+    Forget { id: String },
     /// Export all memories
     Export {
         #[arg(long, default_value = "json")]
@@ -133,9 +138,7 @@ enum GraphCommand {
         path: PathBuf,
     },
     /// Structured (callers_of:/callees_of:/imports_of:/tests_for:/path:<a>..<b>) or keyword query
-    Query {
-        q: String,
-    },
+    Query { q: String },
     /// Recursive caller/importer/test trace from a file or symbol
     BlastRadius {
         target: String,
@@ -202,30 +205,51 @@ async fn main() {
 async fn run(command: Command, config: &Config) -> Result<()> {
     match command {
         Command::Init => cmd_init(&config),
-        Command::Mcp => cmd_mcp(&config).await,
+        Command::Mcp { stdio } => cmd_mcp(&config, stdio).await,
         #[cfg(feature = "viewer")]
         Command::Viewer => cmd_viewer(&config).await,
-        Command::Remember { content, r#type, importance, project, tag } => {
-            cmd_remember(&config, &content, &r#type, importance, project.as_deref(), &tag).await
+        Command::Remember {
+            content,
+            r#type,
+            importance,
+            project,
+            tag,
+        } => {
+            cmd_remember(
+                &config,
+                &content,
+                &r#type,
+                importance,
+                project.as_deref(),
+                &tag,
+            )
+            .await
         }
         Command::Recall { query, limit } => cmd_recall(&config, &query, limit).await,
         Command::Forget { id } => cmd_forget(&config, &id),
         Command::Demo { count, db, force } => cmd_demo(&config, count, db, force).await,
         Command::Export { format } => cmd_export(&config, &format),
-        Command::Context { project, max_tokens } => cmd_context(&config, &project, max_tokens).await,
+        Command::Context {
+            project,
+            max_tokens,
+        } => cmd_context(&config, &project, max_tokens).await,
         Command::Consolidate { project } => cmd_consolidate(&config, project.as_deref()).await,
         Command::Decay => cmd_decay(&config),
         Command::Status => cmd_status(&config),
         Command::Graph { action } => cmd_graph(&config, action),
         Command::Wire { ide } => cmd_wire(&config, &ide),
-        Command::SessionSummary { project, latest } => cmd_session_summary(&config, project.as_deref(), latest).await,
+        Command::SessionSummary { project, latest } => {
+            cmd_session_summary(&config, project.as_deref(), latest).await
+        }
     }
 }
 
 fn cmd_init(config: &Config) -> Result<()> {
     println!("\x1b[38;2;153;0;17m{BANNER}\x1b[0m");
 
-    config.ensure_dirs().context("failed to create directories")?;
+    config
+        .ensure_dirs()
+        .context("failed to create directories")?;
 
     // Create default config if it doesn't exist: every key present but
     // commented, except values resolved by local-provider detection.
@@ -249,7 +273,10 @@ fn cmd_init(config: &Config) -> Result<()> {
     // Create project-local .poneglyphignore (skip if exists).
     let ignore_path = std::path::Path::new(".poneglyphignore");
     if !ignore_path.exists() {
-        std::fs::write(ignore_path, "node_modules/\ntarget/\nvendor/\n.git/\ndist/\nbuild/\nout/\n.DS_Store\n")?;
+        std::fs::write(
+            ignore_path,
+            "node_modules/\ntarget/\nvendor/\n.git/\ndist/\nbuild/\nout/\n.DS_Store\n",
+        )?;
         println!("Created: .poneglyphignore");
     }
 
@@ -264,7 +291,8 @@ fn cmd_init(config: &Config) -> Result<()> {
             "last_build": null,
             "languages": ["rust", "typescript", "javascript", "python", "go"]
         });
-        std::fs::write(&lock_path, serde_json::to_string_pretty(&lock)?).context("failed to write code-graph-lock.json")?;
+        std::fs::write(&lock_path, serde_json::to_string_pretty(&lock)?)
+            .context("failed to write code-graph-lock.json")?;
         println!("Created: .poneglyph/code-graph-lock.json");
     }
 
@@ -272,12 +300,21 @@ fn cmd_init(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_wire(_config: &Config, ide: &str) -> Result<()> {
-    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "poneglyph".to_string());
+fn cmd_wire(config: &Config, ide: &str) -> Result<()> {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "poneglyph".to_string());
     let hooks_dir = Config::config_dir().join("hooks");
 
-    let outcome = detect::wire_agent(ide, &hooks_dir, &exe)?;
+    let outcome = detect::wire_agent(ide, &hooks_dir, &exe, config.agents.mcp_server_port)?;
     println!("{:<14} {}", outcome.agent, outcome.status.as_str());
+    if ide == "claude-code" && outcome.status != detect::SetupStatus::Disabled {
+        println!(
+            "               note: `poneglyph mcp` is a persistent daemon — keep it running \
+             (e.g. `poneglyph mcp &`) so Claude Code can reach http://127.0.0.1:{}/mcp",
+            config.agents.mcp_server_port
+        );
+    }
 
     // Auto-inject rules into global agent rule file.
     if let Some(home) = detect::home_dir() {
@@ -344,16 +381,53 @@ async fn open_store_and_worker(
     Ok((store, embedder, shared_config, enrich, worker))
 }
 
-/// MCP stdio server only — for editor/agent integration. `poneglyph viewer`
-/// runs the HTTP dashboard as a separate, independent process.
-async fn cmd_mcp(config: &Config) -> Result<()> {
+/// MCP engine. Default: Streamable HTTP on `agents.mcp_server_port` — a
+/// persistent daemon serving `/mcp` (agents) alongside the same `/api`,
+/// `/ingest`, `/healthz` routes as `poneglyph viewer` (separate port), so
+/// hooks have one always-on process to talk to. `--stdio` keeps the old
+/// editor-spawned-per-session shape for clients that need it.
+async fn cmd_mcp(config: &Config, stdio: bool) -> Result<()> {
     let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
 
-    // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
-    let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store, embedder, shared_config).with_enrich(enrich);
-    let result = poneglyph_mcp::server::run_stdio(mcp).await;
+    let health = poneglyph_core::llm::health(&config.llm).await;
+    tracing::info!(
+        llm_enabled = config.llm.enabled,
+        reachable = health.reachable,
+        status = ?health.status,
+        "LLM health check"
+    );
 
-    worker.abort(); // client gone; no more producers
+    let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store.clone(), embedder.clone(), shared_config.clone())
+        .with_enrich(enrich.clone());
+
+    if stdio {
+        // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
+        let result = poneglyph_mcp::server::run_stdio(mcp).await;
+        worker.abort(); // client gone; no more producers
+        return result;
+    }
+
+    let http_state = poneglyph_http::AppState {
+        store,
+        embedder,
+        config: shared_config,
+        enrich: Some(enrich),
+    };
+    let app = poneglyph_http::build_router(http_state)
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .nest_service("/mcp", poneglyph_mcp::server::streamable_http_service(mcp));
+
+    let addr = format!("127.0.0.1:{}", config.agents.mcp_server_port);
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("failed to bind MCP engine on {addr}"))?;
+    println!("MCP engine listening on http://{addr} (mcp: /mcp, api: /api, ingest: /ingest)");
+    let result = tokio::select! {
+        r = axum::serve(listener, app) => r.context("MCP engine server failed"),
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    };
+
+    worker.abort();
     result
 }
 
@@ -364,7 +438,9 @@ async fn cmd_viewer(config: &Config) -> Result<()> {
     poneglyph_http::validate_security(config)?;
     let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
 
-    let listener = poneglyph_http::bind(config).await.context("failed to bind HTTP server")?;
+    let listener = poneglyph_http::bind(config)
+        .await
+        .context("failed to bind HTTP server")?;
     let http_state = poneglyph_http::AppState {
         store,
         embedder,
@@ -372,7 +448,10 @@ async fn cmd_viewer(config: &Config) -> Result<()> {
         enrich: Some(enrich),
     };
 
-    println!("Viewer listening on http://{}:{}", config.dashboard.host, config.dashboard.port);
+    println!(
+        "Viewer listening on http://{}:{}",
+        config.dashboard.host, config.dashboard.port
+    );
     let result = tokio::select! {
         r = poneglyph_http::serve_on(listener, http_state) => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
@@ -422,7 +501,10 @@ async fn cmd_demo(config: &Config, count: usize, db: Option<PathBuf>, force: boo
 
     println!(
         "Seeded {} memories, {} edges, {} projects into {}.",
-        outcome.memories, outcome.edges, outcome.projects, db_path.display()
+        outcome.memories,
+        outcome.edges,
+        outcome.projects,
+        db_path.display()
     );
 
     if is_default_db {
@@ -444,9 +526,12 @@ async fn cmd_remember(
     let store = Store::open(&config.db_path)?;
     let embedder = try_embedder(config).await;
 
-    let exclude_matcher = poneglyph_core::privacy::build_exclude_matcher(&config.privacy.exclude_paths);
+    let exclude_matcher =
+        poneglyph_core::privacy::build_exclude_matcher(&config.privacy.exclude_paths);
     if poneglyph_core::privacy::content_references_excluded_path(content, &exclude_matcher) {
-        anyhow::bail!("refusing to store: content references an excluded path (see [privacy].exclude_paths)");
+        anyhow::bail!(
+            "refusing to store: content references an excluded path (see [privacy].exclude_paths)"
+        );
     }
     let content = poneglyph_core::privacy::redact_content(content, &config.privacy);
 
@@ -488,7 +573,11 @@ async fn cmd_remember(
     // Caveman compression runs inline above; semantic compression enqueues a
     // job for whichever resident `serve` worker drains it next.
     if config.memory.compression_enabled {
-        poneglyph_core::enrich::enqueue_compression(&store, &mem.id, config.memory.compression_mode)?;
+        poneglyph_core::enrich::enqueue_compression(
+            &store,
+            &mem.id,
+            config.memory.compression_mode,
+        )?;
     }
 
     println!("{}", mem.id);
@@ -521,7 +610,12 @@ async fn cmd_recall(config: &Config, query: &str, limit: usize) -> Result<()> {
 
     for r in &results {
         // Full id: UUIDv7 prefixes are timestamps, so short prefixes collide.
-        println!("[{:.4}] {} — {}", r.score, r.memory.id, truncate(&r.memory.content, 80));
+        println!(
+            "[{:.4}] {} — {}",
+            r.score,
+            r.memory.id,
+            truncate(&r.memory.content, 80)
+        );
     }
 
     Ok(())
@@ -556,7 +650,10 @@ fn cmd_export(config: &Config, format: &str) -> Result<()> {
             for mem in &memories {
                 println!("## {}\n", &mem.id[..8]);
                 println!("{}\n", mem.content);
-                println!("Type: {} | Importance: {} | Created: {}\n", mem.memory_type, mem.importance, mem.created_at);
+                println!(
+                    "Type: {} | Importance: {} | Created: {}\n",
+                    mem.memory_type, mem.importance, mem.created_at
+                );
                 println!("---\n");
             }
         }
@@ -580,7 +677,9 @@ async fn cmd_context(config: &Config, project: &str, max_tokens: usize) -> Resul
     // Nudge toward graph init if the code graph is empty.
     let stats = store.stats()?;
     if stats.edge_count == 0 {
-        eprintln!("poneglyph: code graph is empty — run `poneglyph graph init` to enable codegraph_query/codegraph_blast_radius.");
+        eprintln!(
+            "poneglyph: code graph is empty — run `poneglyph graph init` to enable codegraph_query/codegraph_blast_radius."
+        );
     }
 
     Ok(())
@@ -603,14 +702,20 @@ async fn cmd_consolidate(config: &Config, project_path: Option<&str>) -> Result<
             pid,
             config,
             embedder.as_deref(),
-        ).await?;
+        )
+        .await?;
 
         if results.is_empty() {
             println!("No clusters found to consolidate.");
         } else {
             println!("Consolidated {} clusters:", results.len());
             for r in &results {
-                println!("  decoy {} — {} children: {}", &r.decoy_id[..8], r.child_count, truncate(&r.summary, 60));
+                println!(
+                    "  decoy {} — {} children: {}",
+                    &r.decoy_id[..8],
+                    r.child_count,
+                    truncate(&r.summary, 60)
+                );
             }
         }
     } else {
@@ -624,7 +729,8 @@ async fn cmd_consolidate(config: &Config, project_path: Option<&str>) -> Result<
                 &project.id,
                 config,
                 embedder.as_deref(),
-            ).await?;
+            )
+            .await?;
 
             if !results.is_empty() {
                 println!("Project {}:", project.name);
@@ -671,13 +777,16 @@ fn cmd_status(config: &Config) -> Result<()> {
     println!("Edges:       {}", stats.edge_count);
     println!("Projects:    {}", stats.project_count);
     println!("Pending jobs:{}", stats.pending_jobs);
-    println!("Enrichment:  {}", if config.llm.enabled { "on" } else { "off" });
+    println!(
+        "Enrichment:  {}",
+        if config.llm.enabled { "on" } else { "off" }
+    );
 
     if Config::using_legacy_paths() {
         println!();
-        println!("Note: data lives at a legacy (pre-XDG) location.");
+        println!("Note: data lives at a legacy location.");
         println!("Move it with poneglyph stopped, e.g.:");
-        println!("  mv ~/Library/'Application Support'/poneglyph/poneglyph.db ~/.local/share/poneglyph/");
+        println!("  mv <legacy poneglyph.db> ~/.config/poneglyph/data/");
     }
 
     Ok(())
@@ -720,11 +829,17 @@ fn cmd_graph(config: &Config, action: GraphCommand) -> Result<()> {
             }
             println!("Root ({} symbol(s)):", report.root.len());
             for n in &report.root {
-                println!("  [{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
+                println!(
+                    "  [{}] {} — {}:{}",
+                    n.kind, n.name, n.file_path, n.start_line
+                );
             }
             println!("\nDependents ({}):", report.dependents.len());
             for d in &report.dependents {
-                println!("  depth {} [{}] {} — {}:{}", d.depth, d.node.kind, d.node.name, d.node.file_path, d.node.start_line);
+                println!(
+                    "  depth {} [{}] {} — {}:{}",
+                    d.depth, d.node.kind, d.node.name, d.node.file_path, d.node.start_line
+                );
             }
             println!("\nTests ({}):", report.tests.len());
             for t in &report.tests {
@@ -736,11 +851,14 @@ fn cmd_graph(config: &Config, action: GraphCommand) -> Result<()> {
                 "json" => codegraph::export_json(&store)?,
                 "dot" => codegraph::export_dot(&store)?,
                 "graphml" => codegraph::export_graphml(&store)?,
-                other => anyhow::bail!("unknown export format '{other}' (use json, dot, or graphml)"),
+                other => {
+                    anyhow::bail!("unknown export format '{other}' (use json, dot, or graphml)")
+                }
             };
             match out {
                 Some(path) => {
-                    std::fs::write(&path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
+                    std::fs::write(&path, rendered)
+                        .with_context(|| format!("failed to write {}", path.display()))?;
                     println!("Exported: {}", path.display());
                 }
                 None => println!("{rendered}"),
@@ -754,7 +872,11 @@ fn cmd_graph(config: &Config, action: GraphCommand) -> Result<()> {
 fn print_build_report(report: &poneglyph_core::codegraph::BuildReport) {
     println!(
         "Parsed {} file(s), {} unchanged, {} removed. {} node(s), {} edge(s).",
-        report.files_parsed, report.files_unchanged, report.files_removed, report.nodes, report.edges
+        report.files_parsed,
+        report.files_unchanged,
+        report.files_removed,
+        report.nodes,
+        report.edges
     );
 }
 
@@ -765,7 +887,9 @@ fn cmd_graph_watch(store: &Store, path: &std::path::Path, config: &Config) -> Re
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(tx).context("failed to start file watcher")?;
-    watcher.watch(path, RecursiveMode::Recursive).context("failed to watch path")?;
+    watcher
+        .watch(path, RecursiveMode::Recursive)
+        .context("failed to watch path")?;
 
     println!("Watching {} (Ctrl-C to stop)...", path.display());
     let debounce = std::time::Duration::from_millis(config.graph.watch_delay_ms);
@@ -794,14 +918,22 @@ fn update_graph_lock() {
     if !lock_path.exists() {
         return;
     }
-    let Ok(raw) = std::fs::read_to_string(lock_path) else { return };
-    let Ok(mut lock) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+    let Ok(raw) = std::fs::read_to_string(lock_path) else {
+        return;
+    };
+    let Ok(mut lock) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
     lock["last_build"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
-    let _ = std::fs::write(lock_path, serde_json::to_string_pretty(&lock).unwrap_or_default());
+    let _ = std::fs::write(
+        lock_path,
+        serde_json::to_string_pretty(&lock).unwrap_or_default(),
+    );
 }
 
 fn extractive_summary(top: &[&poneglyph_core::model::Memory]) -> String {
-    let text = top.iter()
+    let text = top
+        .iter()
         .map(|m| m.content.as_str())
         .collect::<Vec<_>>()
         .join("\n---\n");
@@ -812,7 +944,11 @@ fn extractive_summary(top: &[&poneglyph_core::model::Memory]) -> String {
     }
 }
 
-async fn cmd_session_summary(config: &Config, project_path: Option<&str>, latest: bool) -> Result<()> {
+async fn cmd_session_summary(
+    config: &Config,
+    project_path: Option<&str>,
+    latest: bool,
+) -> Result<()> {
     config.ensure_dirs()?;
     let store = Store::open(&config.db_path)?;
 
@@ -826,7 +962,8 @@ async fn cmd_session_summary(config: &Config, project_path: Option<&str>, latest
         // Show the most recent session-summary memory
         let (memories, _) = store.list_memories(project_id.as_deref(), Some("semantic"), 50, 0)?;
         let summary = memories.iter().find(|m| {
-            m.metadata.as_ref()
+            m.metadata
+                .as_ref()
                 .and_then(|meta| meta.get("tags"))
                 .and_then(|tags| tags.as_array())
                 .map(|arr| arr.iter().any(|t| t.as_str() == Some("session-summary")))
@@ -844,36 +981,50 @@ async fn cmd_session_summary(config: &Config, project_path: Option<&str>, latest
     let (memories, _) = store.list_memories(project_id.as_deref(), None, 30, 0)?;
 
     // Filter to real memories (not decoys, not session-summary tags)
-    let real: Vec<_> = memories.iter().filter(|m| {
-        !m.is_decoy && !m.metadata.as_ref()
-            .and_then(|meta| meta.get("tags"))
-            .and_then(|tags| tags.as_array())
-            .map(|arr| arr.iter().any(|t| t.as_str() == Some("session-summary")))
-            .unwrap_or(false)
-    }).collect();
+    let real: Vec<_> = memories
+        .iter()
+        .filter(|m| {
+            !m.is_decoy
+                && !m
+                    .metadata
+                    .as_ref()
+                    .and_then(|meta| meta.get("tags"))
+                    .and_then(|tags| tags.as_array())
+                    .map(|arr| arr.iter().any(|t| t.as_str() == Some("session-summary")))
+                    .unwrap_or(false)
+        })
+        .collect();
 
     if real.is_empty() {
         return Ok(());
     }
 
-    // Sort by importance, take top 5
+    // Sort by importance, take top 10
     let mut sorted = real.clone();
-    sorted.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
-    let top: Vec<_> = sorted.iter().take(5).copied().collect();
+    sorted.sort_by(|a, b| {
+        b.importance
+            .partial_cmp(&a.importance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let top: Vec<_> = sorted.iter().take(10).copied().collect();
 
     // Try LLM summarization; fall back to extractive join
     let llm = LlmClient::from_config(&config.llm);
     let summary_text = if let Some(client) = &llm {
-        let memories_text = top.iter()
+        let memories_text = top
+            .iter()
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
             .join("\n---\n");
-        match client.complete(
-            "You summarize coding sessions for a developer's memory store. \
+        match client
+            .complete(
+                "You summarize coding sessions for a developer's memory store. \
              Given a few memories from one session, reply with a concise summary \
              of what was worked on. Plain text, no preamble, 2-4 sentences.",
-            &memories_text,
-        ).await {
+                &memories_text,
+            )
+            .await
+        {
             Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
             _ => extractive_summary(&top), // LLM failed, fall back
         }

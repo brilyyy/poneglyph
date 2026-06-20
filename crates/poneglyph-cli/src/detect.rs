@@ -63,6 +63,7 @@ pub fn run_agent_setup(
         &home,
         hooks_dir,
         exe,
+        agents.mcp_server_port,
     )?];
 
     #[cfg(feature = "cursor")]
@@ -80,12 +81,12 @@ pub fn run_agent_setup(
 }
 
 /// Wire up a single agent by name. Always enabled (ignores config flags).
-pub fn wire_agent(ide: &str, hooks_dir: &Path, exe: &str) -> Result<SetupOutcome> {
+pub fn wire_agent(ide: &str, hooks_dir: &Path, exe: &str, mcp_port: u16) -> Result<SetupOutcome> {
     let Some(home) = home_dir() else {
         anyhow::bail!("could not resolve home directory");
     };
     match ide {
-        "claude-code" => setup_claude_code(true, &home, hooks_dir, exe),
+        "claude-code" => setup_claude_code(true, &home, hooks_dir, exe, mcp_port),
         #[cfg(feature = "opencode")]
         "opencode" => setup_opencode(true, &home, exe),
         #[cfg(feature = "cursor")]
@@ -142,6 +143,7 @@ fn setup_claude_code(
     home: &Path,
     hooks_dir: &Path,
     exe: &str,
+    mcp_port: u16,
 ) -> Result<SetupOutcome> {
     if !enabled {
         return Ok(SetupOutcome {
@@ -159,7 +161,15 @@ fn setup_claude_code(
 
     install_hook_scripts(hooks_dir)?;
     let hooks_changed = merge_claude_code_hooks(&claude_dir.join("settings.json"), hooks_dir)?;
-    let mcp_changed = merge_json_mcp_server(&home.join(".claude.json"), "mcpServers", true, exe)?;
+    // `poneglyph mcp` is a persistent HTTP daemon now, not session-spawned —
+    // register it as a remote server rather than a stdio command.
+    let mcp_changed = merge_json_mcp_server(
+        &home.join(".claude.json"),
+        "mcpServers",
+        true,
+        exe,
+        Some(mcp_port),
+    )?;
     let skill_changed = install_skill_file(&claude_dir.join("skills"))?;
 
     let status = if hooks_changed || mcp_changed || skill_changed {
@@ -188,7 +198,8 @@ fn setup_cursor(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
             status: SetupStatus::NotDetected,
         });
     }
-    let changed = merge_json_mcp_server(&cursor_dir.join("mcp.json"), "mcpServers", true, exe)?;
+    let changed =
+        merge_json_mcp_server(&cursor_dir.join("mcp.json"), "mcpServers", true, exe, None)?;
     let status = if changed {
         SetupStatus::Configured
     } else {
@@ -215,8 +226,13 @@ fn setup_gemini_cli(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcom
             status: SetupStatus::NotDetected,
         });
     }
-    let changed =
-        merge_json_mcp_server(&gemini_dir.join("settings.json"), "mcpServers", true, exe)?;
+    let changed = merge_json_mcp_server(
+        &gemini_dir.join("settings.json"),
+        "mcpServers",
+        true,
+        exe,
+        None,
+    )?;
     let status = if changed {
         SetupStatus::Configured
     } else {
@@ -306,6 +322,7 @@ fn setup_copilot_cli(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutco
         "mcpServers",
         true,
         exe,
+        None,
     )?;
     let status = if changed {
         SetupStatus::Configured
@@ -409,6 +426,7 @@ fn merge_json_mcp_server(
     top_key: &str,
     include_type_stdio: bool,
     exe: &str,
+    http_port: Option<u16>,
 ) -> Result<bool> {
     let mut root = read_json_object(path)?;
     let obj = root
@@ -421,10 +439,19 @@ fn merge_json_mcp_server(
     if servers.contains_key("poneglyph") {
         return Ok(false);
     }
-    let mut entry = json!({ "command": exe, "args": ["mcp"] });
-    if include_type_stdio {
-        entry["type"] = json!("stdio");
-    }
+    // `poneglyph mcp` runs as a persistent HTTP daemon by default now; an
+    // http_port registers the remote URL directly, otherwise we fall back
+    // to spawning the CLI in stdio mode (`mcp --stdio`).
+    let entry = match http_port {
+        Some(port) => json!({ "type": "http", "url": format!("http://127.0.0.1:{port}/mcp") }),
+        None => {
+            let mut e = json!({ "command": exe, "args": ["mcp", "--stdio"] });
+            if include_type_stdio {
+                e["type"] = json!("stdio");
+            }
+            e
+        }
+    };
     servers.insert("poneglyph".to_string(), entry);
     write_json(path, &root)?;
     Ok(true)
@@ -693,7 +720,7 @@ pub fn render_config_template(detected: &Detected) -> String {
     agents_lines.push("# codex = true");
     #[cfg(feature = "copilot")]
     agents_lines.push("# copilot_cli = true");
-    agents_lines.push("# mcp_server_port = 37778");
+    agents_lines.push("# mcp_server_port = 27271");
     let agents_block = agents_lines.join("\n");
 
     format!(
@@ -702,7 +729,7 @@ pub fn render_config_template(detected: &Detected) -> String {
 
 [general]
 # Where poneglyph stores its database, embeddings cache, and cold storage.
-# Defaults to the XDG data directory (~/.local/share/poneglyph on Linux).
+# Defaults to ~/.config/poneglyph/data.
 # data_dir = "..."
 
 # Verbosity of logs written to stderr. "info" is quiet; "debug" shows
@@ -922,8 +949,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
 
-        let changed1 =
-            merge_json_mcp_server(&path, "mcpServers", true, "/usr/local/bin/poneglyph").unwrap();
+        let changed1 = merge_json_mcp_server(
+            &path,
+            "mcpServers",
+            true,
+            "/usr/local/bin/poneglyph",
+            None,
+        )
+        .unwrap();
         assert!(changed1);
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
@@ -931,10 +964,32 @@ mod tests {
             "/usr/local/bin/poneglyph"
         );
         assert_eq!(v["mcpServers"]["poneglyph"]["type"], "stdio");
+        assert_eq!(v["mcpServers"]["poneglyph"]["args"][1], "--stdio");
 
-        let changed2 =
-            merge_json_mcp_server(&path, "mcpServers", true, "/usr/local/bin/poneglyph").unwrap();
+        let changed2 = merge_json_mcp_server(
+            &path,
+            "mcpServers",
+            true,
+            "/usr/local/bin/poneglyph",
+            None,
+        )
+        .unwrap();
         assert!(!changed2, "second merge must be a no-op");
+    }
+
+    #[test]
+    fn merge_json_mcp_server_http_transport() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+
+        merge_json_mcp_server(&path, "mcpServers", true, "poneglyph", Some(27271)).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["mcpServers"]["poneglyph"]["type"], "http");
+        assert_eq!(
+            v["mcpServers"]["poneglyph"]["url"],
+            "http://127.0.0.1:27271/mcp"
+        );
+        assert!(v["mcpServers"]["poneglyph"].get("command").is_none());
     }
 
     #[test]
@@ -947,7 +1002,7 @@ mod tests {
         )
         .unwrap();
 
-        merge_json_mcp_server(&path, "mcpServers", true, "poneglyph").unwrap();
+        merge_json_mcp_server(&path, "mcpServers", true, "poneglyph", None).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["mcpServers"]["other-tool"]["command"], "other");
         assert_eq!(v["unrelated"], 1);
@@ -958,10 +1013,11 @@ mod tests {
     fn merge_json_mcp_server_without_type_field() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("opencode.json");
-        merge_json_mcp_server(&path, "mcp", false, "poneglyph").unwrap();
+        merge_json_mcp_server(&path, "mcp", false, "poneglyph", None).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(v["mcp"]["poneglyph"].get("type").is_none());
         assert_eq!(v["mcp"]["poneglyph"]["args"][0], "mcp");
+        assert_eq!(v["mcp"]["poneglyph"]["args"][1], "--stdio");
     }
 
     #[cfg(feature = "opencode")]
@@ -1138,7 +1194,7 @@ mod tests {
         let home = dir.path();
         std::fs::create_dir_all(home.join(".claude")).unwrap();
 
-        setup_claude_code(true, home, &dir.path().join("hooks"), "poneglyph").unwrap();
+        setup_claude_code(true, home, &dir.path().join("hooks"), "poneglyph", 27271).unwrap();
         assert!(home.join(".claude/skills/poneglyph/SKILL.md").exists());
     }
 
@@ -1247,19 +1303,17 @@ mod tests {
 
     #[test]
     fn run_agent_setup_respects_disabled_flags() {
+        // ponytail: AgentsConfig fields aren't feature-gated (see config.rs)
+        // so this literal must set all of them unconditionally — #[cfg]
+        // per-field here was a pre-existing bug (E0063 under default features).
         let agents = AgentsConfig {
             claude_code: false,
-            #[cfg(feature = "cursor")]
             cursor: false,
-            #[cfg(feature = "gemini")]
             gemini_cli: false,
-            #[cfg(feature = "opencode")]
             opencode: false,
-            #[cfg(feature = "codex")]
             codex: false,
-            #[cfg(feature = "copilot")]
             copilot_cli: false,
-            mcp_server_port: 37778,
+            mcp_server_port: 27271,
         };
         let dir = tempdir().unwrap();
         let outcomes = run_agent_setup(&agents, &dir.path().join("hooks"), "poneglyph").unwrap();

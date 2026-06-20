@@ -8,6 +8,7 @@ import type {
   Project,
   ProjectContext,
   SearchHit,
+  ServicesStatus,
   Stats,
   TimelineResponse,
   TokenSavings,
@@ -88,6 +89,8 @@ export const api = {
   tokenSavings: () => request<TokenSavings>('/api/token-savings'),
 
   agentsStatus: () => request<AgentsStatus>('/api/agents-status'),
+
+  servicesStatus: () => request<ServicesStatus>('/api/services-status'),
 
   context: (params: { project_path: string; max_tokens?: number }) =>
     request<ProjectContext>(`/api/context${qs(params)}`),

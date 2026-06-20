@@ -328,6 +328,31 @@ async fn graph_focus_neighborhood_and_global_sample() {
 }
 
 // ---------------------------------------------------------------------------
+// /api/services-status
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn services_status_reports_mcp_llm_viewer() {
+    let mut config = Config::default();
+    config.dashboard.port = 3742;
+    let (state, _) = test_state(config);
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/services-status")).await;
+    assert_eq!(status, StatusCode::OK);
+    // Nothing is listening on the default mcp_server_port in this test ⇒ down.
+    assert_eq!(body["mcp"]["up"], false);
+    assert_eq!(body["mcp"]["port"], 27271);
+    // LLM disabled by default config ⇒ unreachable, but the shape is present.
+    assert_eq!(body["llm"]["enabled"], false);
+    assert_eq!(body["llm"]["up"], false);
+    assert_eq!(body["llm"]["provider"], "ollama");
+    // Viewer is answering this very request ⇒ always up.
+    assert_eq!(body["viewer"]["up"], true);
+    assert_eq!(body["viewer"]["port"], 3742);
+}
+
+// ---------------------------------------------------------------------------
 // /api/context
 // ---------------------------------------------------------------------------
 

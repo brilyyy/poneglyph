@@ -21,7 +21,10 @@ printf '%s' "$PAYLOAD" | "$HERE/posttooluse.sh"
 printf '%s' "$PAYLOAD" | "$HERE/posttooluse.sh"  # immediate repeat — should be debounced
 sleep 0.5  # the graph-update trigger is a detached background process
 
-CALLS=$(wc -l < "$TMP/calls.log" 2>/dev/null || echo 0)
+# ponytail: the stub also logs the "remember" fallback call posttooluse.sh
+# makes on every invocation (no engine is running in this offline test) —
+# filter to just the graph-update trigger, which is what's actually debounced.
+CALLS=$(grep -c '^graph update' "$TMP/calls.log" 2>/dev/null || echo 0)
 if [ "$CALLS" -ne 1 ]; then
   echo "FAIL: expected exactly 1 graph update trigger, got $CALLS"
   cat "$TMP/calls.log" 2>/dev/null || true

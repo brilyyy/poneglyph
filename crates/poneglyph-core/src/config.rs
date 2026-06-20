@@ -98,6 +98,10 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
     pub timeout_seconds: u64,
     pub max_generation_tokens: u32,
+    /// Health-check URL (e.g. an mlx/omlx `/health` endpoint). Defaults to
+    /// `base_url` with a trailing `/v1` trimmed and `/health` appended.
+    #[serde(default)]
+    pub health_check_url: Option<String>,
 }
 
 impl Default for LlmConfig {
@@ -110,6 +114,7 @@ impl Default for LlmConfig {
             api_key: None,
             timeout_seconds: 60,
             max_generation_tokens: 2048,
+            health_check_url: None,
         }
     }
 }
@@ -306,7 +311,7 @@ pub struct AgentsConfig {
     pub opencode: bool,
     pub codex: bool,
     pub copilot_cli: bool,
-    /// MCP server port for non-stdio clients.
+    /// Port the MCP engine's Streamable HTTP transport binds on (127.0.0.1).
     pub mcp_server_port: u16,
 }
 
@@ -319,7 +324,7 @@ impl Default for AgentsConfig {
             opencode: false,
             codex: false,
             copilot_cli: false,
-            mcp_server_port: 37778,
+            mcp_server_port: 27271,
         }
     }
 }
@@ -496,29 +501,42 @@ fn xdg_dir(env_var: &str, home_suffix: &str) -> PathBuf {
     xdg_dir_from(std::env::var_os(env_var), &home_dir(), home_suffix)
 }
 
-/// Legacy (pre-XDG) data dir, used only as a read fallback.
-fn legacy_data_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "poneglyph").map(|d| d.data_dir().to_path_buf())
+/// Pre-`.config/poneglyph/data` data dir(s), used only as a read fallback.
+/// Two generations of "legacy" exist: the original macOS `ProjectDirs`
+/// location, and the XDG `.local/share` location used before the move to
+/// `.config/poneglyph/data`.
+fn legacy_data_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    #[cfg(unix)]
+    dirs.push(xdg_dir("XDG_DATA_HOME", ".local/share"));
+    if let Some(d) = directories::ProjectDirs::from("", "", "poneglyph") {
+        dirs.push(d.data_dir().to_path_buf());
+    }
+    dirs
 }
 
 fn legacy_config_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "poneglyph").map(|d| d.config_dir().to_path_buf())
 }
 
-/// Prefer `new`; fall back to `legacy` when only the legacy artifact exists.
-fn resolve_with_legacy(new: PathBuf, legacy: Option<PathBuf>) -> PathBuf {
-    match legacy {
-        Some(l) if !new.exists() && l.exists() && l != new => {
+/// Prefer `new`; fall back to the first existing entry in `legacy` when only
+/// a legacy artifact exists.
+fn resolve_with_legacy(new: PathBuf, legacy: impl IntoIterator<Item = PathBuf>) -> PathBuf {
+    if new.exists() {
+        return new;
+    }
+    for l in legacy {
+        if l.exists() && l != new {
             tracing::warn!(
                 legacy = %l.display(),
                 new = %new.display(),
                 "using legacy location — move it to the new path to silence this \
                  (stop poneglyph first, then mv the file/dir)"
             );
-            l
+            return l;
         }
-        _ => new,
     }
+    new
 }
 
 // ---------------------------------------------------------------------------
@@ -650,13 +668,10 @@ fn prepare_toml(path: &std::path::Path) -> Result<String> {
 }
 
 impl Config {
+    /// Default data dir: `~/.config/poneglyph/data` (kept under the config
+    /// dir rather than XDG_DATA_HOME — one place to find everything).
     pub fn data_dir() -> PathBuf {
-        #[cfg(unix)]
-        return xdg_dir("XDG_DATA_HOME", ".local/share");
-        #[cfg(not(unix))]
-        return directories::ProjectDirs::from("", "", "poneglyph")
-            .map(|dirs| dirs.data_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
+        Self::config_dir().join("data")
     }
 
     pub fn config_dir() -> PathBuf {
@@ -692,14 +707,14 @@ impl Config {
     pub fn default_db_path() -> PathBuf {
         resolve_with_legacy(
             Self::data_dir().join(DB_FILE),
-            legacy_data_dir().map(|d| d.join(DB_FILE)),
+            legacy_data_dirs().into_iter().map(|d| d.join(DB_FILE)),
         )
     }
 
     pub fn default_model_cache_dir() -> PathBuf {
         resolve_with_legacy(
             Self::cache_dir().join(MODEL_CACHE_DIR),
-            legacy_data_dir().map(|d| d.join(MODEL_CACHE_DIR)),
+            legacy_data_dirs().into_iter().map(|d| d.join(MODEL_CACHE_DIR)),
         )
     }
 

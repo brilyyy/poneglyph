@@ -191,6 +191,68 @@ fn non_empty(s: &Option<String>) -> Option<&str> {
     s.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// Per-provider default base URL — independent of which `llm-*` feature (if
+/// any) is compiled in, since `health()` must work even with none enabled.
+fn provider_default_base(provider: &str) -> &'static str {
+    match provider {
+        "ollama" => "http://localhost:11434/v1",
+        "lmstudio" => "http://localhost:1234/v1",
+        "gpt4all" => "http://localhost:4891/v1",
+        "anthropic" => "https://api.anthropic.com",
+        "gemini" => "https://generativelanguage.googleapis.com",
+        _ => "https://api.openai.com/v1", // "openai" and anything unrecognized
+    }
+}
+
+/// Result of probing the configured LLM's health endpoint.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LlmHealth {
+    pub reachable: bool,
+    /// Whatever the endpoint's JSON `status` field said (e.g. mlx/omlx's
+    /// `"healthy"`) — any value here counts as reachable, not just "healthy".
+    pub status: Option<String>,
+    pub detail: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HealthBody {
+    status: Option<String>,
+}
+
+/// Resolve the URL to probe: explicit `health_check_url`, else `base_url`
+/// (or the provider default) with a trailing `/v1` trimmed and `/health`
+/// appended.
+fn health_url(cfg: &LlmConfig) -> String {
+    if let Some(url) = non_empty(&cfg.health_check_url) {
+        return url.to_string();
+    }
+    let base = non_empty(&cfg.base_url).unwrap_or_else(|| provider_default_base(&cfg.provider));
+    let base = base.strip_suffix('/').unwrap_or(base);
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    format!("{base}/health")
+}
+
+/// GET the LLM's health endpoint. Any 2xx is reachable; a JSON `status`
+/// field in the body (e.g. `{"status":"healthy"}`) is surfaced as-is — ok
+/// whether it says "healthy" or something else, per PRD. A bare reqwest
+/// call, so this runs even when no `llm-*` provider feature is compiled in.
+pub async fn health(cfg: &LlmConfig) -> LlmHealth {
+    let url = health_url(cfg);
+    let client = reqwest::Client::new();
+    match client.get(&url).timeout(std::time::Duration::from_secs(2)).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let status = resp.json::<HealthBody>().await.ok().and_then(|b| b.status);
+            LlmHealth { reachable: true, status, detail: None }
+        }
+        Ok(resp) => LlmHealth {
+            reachable: false,
+            status: None,
+            detail: Some(format!("HTTP {}", resp.status())),
+        },
+        Err(e) => LlmHealth { reachable: false, status: None, detail: Some(e.to_string()) },
+    }
+}
+
 #[cfg(feature = "llm-anthropic")]
 fn non_empty_owned(s: &str, default: &str) -> String {
     if s.is_empty() { default.to_string() } else { s.to_string() }
@@ -538,6 +600,49 @@ async fn score_importance(store: &mut Store, client: &LlmClient, m: &crate::mode
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_url_derivation() {
+        // Explicit health_check_url wins outright.
+        let cfg = LlmConfig {
+            health_check_url: Some("http://x/custom-health".into()),
+            base_url: Some("http://x/v1".into()),
+            ..Default::default()
+        };
+        assert_eq!(health_url(&cfg), "http://x/custom-health");
+
+        // Otherwise derive from base_url, trimming a trailing /v1.
+        let cfg = LlmConfig { base_url: Some("http://localhost:11434/v1".into()), ..Default::default() };
+        assert_eq!(health_url(&cfg), "http://localhost:11434/health");
+
+        // No base_url → falls back to the provider default.
+        let cfg = LlmConfig { provider: "ollama".into(), ..Default::default() };
+        assert_eq!(health_url(&cfg), "http://localhost:11434/health");
+    }
+
+    #[tokio::test]
+    async fn health_reports_up_with_any_status_value() {
+        let app = axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "healthy"})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let cfg = LlmConfig { base_url: Some(format!("http://{addr}")), ..Default::default() };
+        let result = health(&cfg).await;
+        assert!(result.reachable);
+        assert_eq!(result.status, Some("healthy".to_string()));
+    }
+
+    #[tokio::test]
+    async fn health_reports_down_when_unreachable() {
+        // Nothing listens on this port.
+        let cfg = LlmConfig { base_url: Some("http://127.0.0.1:1".into()), ..Default::default() };
+        let result = health(&cfg).await;
+        assert!(!result.reachable);
+    }
 
     #[test]
     fn from_config_none_unless_enabled_with_a_model() {
