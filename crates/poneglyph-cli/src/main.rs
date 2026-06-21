@@ -24,9 +24,9 @@ const BANNER: &str = include_str!("banner.txt");
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    /// Path to config file
-    #[arg(long, global = true)]
-    config: Option<PathBuf>,
+    /// Path to an explicit config file to load instead of the default search
+    #[arg(long = "config-file", global = true)]
+    config_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -199,7 +199,7 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let config = match load_config(&cli.config) {
+    let config = match load_config(&cli.config_file) {
         Ok(c) => c,
         Err(e) => {
             let err: poneglyph_core::error::PoneglyphError = e.into();
@@ -230,7 +230,7 @@ async fn main() {
 
 async fn run(command: Command, config: &Config) -> Result<()> {
     match command {
-        Command::Init { config: write_global } => cmd_init(&config, write_global),
+        Command::Init { config: write_global_config } => cmd_init(&config, write_global_config),
         Command::Daemon { action } => cmd_daemon(&config, action),
         Command::Mcp { stdio } => cmd_mcp(&config, stdio).await,
         #[cfg(feature = "viewer")]
