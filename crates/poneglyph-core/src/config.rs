@@ -230,6 +230,15 @@ pub struct CodeGraphConfig {
     /// Upper bound on nodes returned per /api/graph or /api/codegraph request
     /// (the viewer's limit slider can request up to this many).
     pub max_render_nodes: usize,
+    /// How often (minutes) the running `poneglyph mcp` daemon re-builds
+    /// (incrementally) every project tracked in `graph_projects.toml`.
+    /// 0 disables auto-update.
+    #[serde(default = "default_auto_update_minutes")]
+    pub auto_update_minutes: u64,
+}
+
+fn default_auto_update_minutes() -> u64 {
+    15
 }
 
 impl Default for CodeGraphConfig {
@@ -263,6 +272,7 @@ impl Default for CodeGraphConfig {
             watch_delay_ms: 2000,
             blast_radius_depth: 5,
             max_render_nodes: 50_000,
+            auto_update_minutes: default_auto_update_minutes(),
         }
     }
 }

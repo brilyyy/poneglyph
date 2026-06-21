@@ -108,6 +108,13 @@ export function CosmosGraph({ nodes, links, onNodeClick, onBackgroundClick, clas
       sizes[i] = n.size
     })
 
+    // ponytail: fixed node-count threshold, not a measured frame budget —
+    // bump it (or make it configurable) if it's wrong for real hardware.
+    // Large graphs skip the force simulation entirely (native cosmos.gl
+    // config flag) and render statically at their stored/scattered
+    // positions — keeps WebGL load down instead of animating forever.
+    graph.setConfigPartial({ enableSimulation: nodes.length <= 2000 })
+
     const validLinks = links.filter((l) => idToIndex.has(l.source) && idToIndex.has(l.target))
     const linkArr = new Float32Array(validLinks.length * 2)
     const linkWidths = new Float32Array(validLinks.length)

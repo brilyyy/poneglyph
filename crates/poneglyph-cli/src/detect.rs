@@ -577,16 +577,17 @@ fn install_skill_file(skills_dir: &Path) -> Result<bool> {
 // Never creates a file the user doesn't have.
 // ---------------------------------------------------------------------------
 
+// Start/end markers stay hardcoded (never moved to an asset file) so a grep
+// for them always finds a literal in source, not a templated value. The body
+// between them is the asset that changes.
 const RULES_START: &str = "<!-- poneglyph:start -->";
 const RULES_END: &str = "<!-- poneglyph:end -->";
-const RULES_BODY: &str = "## poneglyph: durable memory + code graph\n\nThis project has poneglyph wired up (MCP server `poneglyph mcp`). Prefer\nits tools over re-deriving things or manually scanning directories:\n\n- `remember` / `recall` / `get_project_context` — durable cross-session\n  memory. Call `get_project_context` at session start, `recall` before\n  re-researching something, `remember` for durable facts/decisions/preferences.\n- `codegraph_query` (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/\n  `path:<a>..<b>`, or a bare keyword for a graph-backed name search) and\n  `codegraph_blast_radius` — call/import/test graph. ALWAYS try this FIRST\n  for \"find X\" / \"what calls/imports/breaks if I change X\" questions — it's\n  a targeted index lookup, not a directory walk, so it stays fast as the\n  codebase grows. Fall back to grep/glob only when the graph has nothing.\n  Requires `poneglyph graph init` to have been run once.";
-#[allow(dead_code)]
+const RULES_BODY: &str = include_str!("assets/rules.txt");
 const RULE_FILES: [&str; 3] = ["CLAUDE.md", "AGENTS.md", ".cursorrules"];
 
 /// For each of CLAUDE.md/AGENTS.md/.cursorrules that already exists directly
 /// under `project_dir`, idempotently insert/replace a fenced poneglyph usage
 /// block. Returns `(filename, changed)` for each file found.
-#[allow(dead_code)]
 pub fn inject_agent_rules(project_dir: &Path) -> Result<Vec<(String, bool)>> {
     let mut out = Vec::new();
     for name in RULE_FILES {
@@ -610,7 +611,7 @@ fn inject_rules_block(path: &Path) -> Result<bool> {
     } else {
         String::new()
     };
-    let block = format!("{RULES_START}\n{RULES_BODY}\n{RULES_END}");
+    let block = format!("{RULES_START}\n{}\n{RULES_END}", RULES_BODY.trim_end());
 
     let new_content = match (existing.find(RULES_START), existing.find(RULES_END)) {
         (Some(start), Some(end)) if end > start => {
@@ -697,6 +698,13 @@ pub fn detect_local_llm() -> Detected {
     }
 }
 
+/// Static skeleton for `config.toml` — every key from the schema, commented
+/// except where `render_config_template` fills in a detected/feature-gated
+/// value. `__LLM_BLOCK__`/`__AGENTS_BLOCK__` are plain-text sentinels (not
+/// `format!` placeholders, since the template itself contains literal
+/// `{ }` for poneglyph's own env-var interpolation syntax).
+const CONFIG_TEMPLATE: &str = include_str!("assets/config-template.toml");
+
 /// Render a full `config.toml`: every key from the schema is present, but
 /// commented (so the figment defaults layer applies) unless detection found
 /// a concrete value worth uncommenting.
@@ -723,220 +731,9 @@ pub fn render_config_template(detected: &Detected) -> String {
     agents_lines.push("# mcp_server_port = 27271");
     let agents_block = agents_lines.join("\n");
 
-    format!(
-        r#"# Poneglyph configuration. Commented keys use built-in defaults; uncomment
-# to override. Supports {{ env.VAR_NAME }} interpolation for secrets.
-
-[general]
-# Where poneglyph stores its database, embeddings cache, and cold storage.
-# Defaults to ~/.config/poneglyph/data.
-# data_dir = "..."
-
-# Verbosity of logs written to stderr. "info" is quiet; "debug" shows
-# every memory insert/recall; "trace" dumps SQL and embedding timings.
-# log_level = "info"        # trace | debug | info | warn | error
-
-# Automatically check for new poneglyph releases on startup.
-# auto_update = true
-
-[embedding]
-# --- Embedding provider ---
-# "local" runs the model on your CPU/GPU via Candle (no network calls).
-# "ollama" or "offload" delegates to an external embedding API.
-# provider = "local"        # local | ollama | openai
-
-# The HuggingFace model ID used for dense vector embeddings.
-# MiniLM-L6-v2 is fast (384 dims, ~30ms/batch on CPU) and accurate enough
-# for code + prose. Swap to a larger model only if recall quality is poor.
-model_id = "sentence-transformers/all-MiniLM-L6-v2"
-
-# Path to a pre-downloaded model directory (local provider only).
-# If unset, the model is downloaded to the data_dir on first use.
-# model_path = "..."
-
-# Vector dimensions — must match the model. MiniLM-L6-v2 = 384.
-# Changing this requires re-embedding all memories (delete vec_memories.db).
-dimensions = 384
-
-# Compute device for the local embedding model. "cuda" requires a CUDA GPU.
-# device = "cpu"            # cpu | cuda
-
-# How many texts to embed in one forward pass. Higher = faster throughput,
-# more memory. 32 is safe for 8GB RAM; bump to 128 if you have 32GB+.
-# batch_size = 32
-
-# Prefixes prepended to queries/passages before embedding. Required for
-# e5-family models (they expect "query: " / "passage: "). MiniLM uses none.
-# query_prefix = ""
-# passage_prefix = ""
-
-[llm]
-{llm_block}
-
-[memory]
-# Master switch for the memory system. When false, poneglyph stores nothing
-# and all MCP tools become no-ops.
-# enabled = true
-
-# How often (seconds) the in-memory buffer flushes to SQLite.
-# Lower = less data loss on crash, more write I/O. 5s is a good balance.
-# flush_interval_secs = 5
-
-# Maximum tokens per memory entry. Content longer than this is truncated
-# at the token boundary. 4000 tokens ≈ 3000 words ≈ one long paragraph.
-# max_entry_tokens = 4000
-
-# Caveman-grammar prose compression: common English words become single
-# Unicode codepoints, shrinking storage ~40%. Reversible; code/paths/versions
-# are never touched. Enable when you have 10k+ memories.
-# compression_enabled = false
-
-# Minimum hybrid retrieval score (0.0–1.0) for a memory to be returned.
-# Lower = more results, more noise. 0.6 filters out weak matches.
-# min_relevance_score = 0.6
-
-[memory.layer_retention]
-# How many days memories live in each tier before expiring.
-# 0 = special: ephemeral (0) = deleted on session end; archival (0) = forever.
-# Memories are promoted/demoted by access frequency and strength.
-# ephemeral = 0    # 0 = session-only (deleted on session end)
-# short_term = 7   # active work, recent context
-# working = 30     # regular use, project context
-# long_term = 180  # rarely accessed but worth keeping
-# archival = 0     # 0 = permanent (never auto-deleted)
-
-[memory.edges]
-# Minimum cosine similarity (0.0–1.0) to create a similarity edge between
-# two memories. Higher = fewer, more precise connections. 0.82 is tuned for
-# MiniLM-L6-v2; adjust if you switch embedding models.
-# similarity_threshold = 0.82
-
-# Maximum time gap (seconds) between memories in the same project to create
-# a temporal edge. 300s = 5 min. Two memories created 4 min apart in the same
-# project get linked. Useful for "what was I working on together" queries.
-# temporal_window_secs = 300
-
-[graph]
-# Master switch for the tree-sitter code knowledge graph.
-# When false, `poneglyph graph` commands and `codegraph_*` MCP tools are no-ops.
-# enabled = true
-
-# Languages to parse. Each needs a matching tree-sitter grammar compiled in.
-# Remove languages you never use to speed up graph builds.
-# languages = ["rust", "typescript", "javascript", "python", "go"]
-
-# Glob patterns for files/directories to skip during graph builds.
-# Honors .poneglyphignore (gitignore syntax) in addition to these.
-# exclude_patterns = ["**/target/**", "**/node_modules/**", "**/.git/**", "**/*.test.ts", "**/*_test.rs"]
-
-# Debounce delay (ms) before re-parsing after a file change during `graph watch`.
-# Lower = more responsive, more CPU. 2000ms batches rapid saves.
-# watch_delay_ms = 2000
-
-# Maximum depth for blast-radius queries. Higher = more transitive dependents
-# found, slower queries. 5 covers most real-world call chains.
-# blast_radius_depth = 5
-
-# Maximum nodes rendered in the code graph visualization.
-# Lower = faster WebGL rendering, may clip large graphs.
-# max_render_nodes = 50000
-
-[dashboard]
-# Web dashboard served at http://host:port. Provides memory browsing,
-# timeline, search, graph visualization, and settings UI.
-# enabled = true
-
-# Network port for the dashboard HTTP server.
-# port = 3742
-
-# Bind address. "127.0.0.1" = local only; "0.0.0.0" = accessible from LAN.
-# host = "127.0.0.1"
-
-# Automatically open the dashboard in your browser on `poneglyph viewer`.
-# open_on_start = false
-
-# Bearer token for API authentication. Empty = no auth (local use only).
-# Prefer the PONEGLYPH_DASHBOARD_TOKEN env var over hardcoding.
-# token = "..."
-
-# Color theme for the dashboard UI. "system" follows your OS preference.
-# theme = "system"     # system | dark | light
-
-# Number of items per page in list views (memories, search results, etc.).
-# items_per_page = 50
-
-[agents]
-# Enable/disable hooks and plugins for each coding agent.
-# Only claude_code is on by default; others need matching --features builds.
-{agents_block}
-
-[privacy]
-# Memories tagged with any of these strings are excluded from retrieval
-# and never returned by recall/context. Useful for secrets, credentials, etc.
-# redaction_tags = ["private", "secret", "confidential"]
-
-# Glob patterns for files whose content is never stored as memories.
-# Applied during hook capture (posttooluse, userpromptsubmit).
-# exclude_paths = ["**/.env", "**/*.pem", "**/*.key", "**/secrets/**"]
-
-# Replace file paths in stored memories with generic placeholders.
-# Useful if your project paths contain sensitive directory names.
-# anonymize_paths = false
-
-[context]
-# Maximum tokens for the context string returned by `get_project_context`
-# MCP tool and `poneglyph context` CLI. This is the budget for session-start
-# injection — higher = more context, more tokens consumed per session.
-# max_tokens = 2000
-
-[enrichment]
-# LLM-powered background enrichment: summarize, extract entities/relations,
-# score importance. Requires [llm] to be enabled. Runs as async jobs.
-# enabled = false
-
-[decay]
-# Ebbinghaus forgetting-curve simulation: memories lose strength over time
-# unless recalled. Prevents stale memories from dominating retrieval.
-# enabled = true
-
-# Minimum strength before a memory is considered "forgotten" (still stored,
-# but ranked very low in retrieval). 0.1 = nearly forgotten.
-# min_strength = 0.1
-
-# Strength threshold below which memories become candidates for consolidation
-# (merging into decoy cluster summaries). 0.3 = moderately faded.
-# consolidation_threshold = 0.3
-
-# How much strength decays per day without access. 0.02 = ~2%/day.
-# After 30 days without recall, a memory at 1.0 drops to ~0.55.
-# daily_decay_rate = 0.02
-
-[consolidation]
-# Merge related memories into cluster summaries ("decoy" memories) to reduce
-# noise and compress context. Uses embedding similarity for clustering.
-# enabled = true
-
-# How often (hours) to run the consolidation pass. 6h = 4x/day.
-# interval_hours = 6
-
-# Minimum memories in a cluster before a decoy summary is created.
-# 2 = even pairs get merged; 3+ = only larger clusters.
-# min_cluster_size = 2
-
-# Minimum embedding cosine similarity for two memories to be in the same
-# cluster. Higher = tighter clusters, fewer merges. 0.75 is conservative.
-# similarity_threshold = 0.75
-
-[cold_storage]
-# Compress old memories to zstd files on disk, freeing SQLite space.
-# Cold memories are still searchable (decompressed on demand) but slower.
-# enabled = true
-
-# zstd compression level (1–22). Higher = smaller files, slower compress.
-# 3 is fast with good ratio (~60% size reduction on prose).
-# compress_level = 3
-"#
-    )
+    CONFIG_TEMPLATE
+        .replace("__LLM_BLOCK__", &llm_block)
+        .replace("__AGENTS_BLOCK__", &agents_block)
 }
 
 #[cfg(test)]

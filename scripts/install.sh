@@ -160,8 +160,29 @@ if [[ -z "$BINARY" ]]; then
 
   # ── build ───────────────────────────────────────────────────────────────
   if [[ "$SKIP_BUILD" == false ]]; then
-    hdr "Building poneglyph (viewer embedded)"
-    bash scripts/build-release.sh
+    BUILD_FEATURES="viewer"
+    if [[ "$YES" == false ]]; then
+      hdr "Choose an LLM provider to compile in"
+      echo "Powers background enrichment/compression. Each provider adds its own"
+      echo "HTTP client dependency, so only what you pick gets compiled in."
+      echo ""
+      echo "  1) OpenAI-compatible — also covers Ollama, LM Studio, gpt4all (base_url)"
+      echo "  2) Anthropic"
+      echo "  3) Gemini"
+      echo ""
+      echo -n "Selection (space-separated, Enter for none): "
+      read -r llm_selection
+      for num in $llm_selection; do
+        case "$num" in
+          1) BUILD_FEATURES="$BUILD_FEATURES,llm-openai" ;;
+          2) BUILD_FEATURES="$BUILD_FEATURES,llm-anthropic" ;;
+          3) BUILD_FEATURES="$BUILD_FEATURES,llm-gemini" ;;
+          *) warn "Unknown option: $num (skipping)" ;;
+        esac
+      done
+    fi
+    hdr "Building poneglyph (features: $BUILD_FEATURES)"
+    bash scripts/build-release.sh "$BUILD_FEATURES"
   else
     hdr "Skipping build (--skip-build)"
   fi
@@ -197,9 +218,10 @@ fi
 
 # ── init ──────────────────────────────────────────────────────────────────────
 if [[ "$NO_INIT" == false ]]; then
-  hdr "Running poneglyph init"
-  "$INSTALL_PATH" init
-  ok "Config, database, and model cache directories created"
+  hdr "Running poneglyph init --config"
+  "$INSTALL_PATH" init --config
+  ok "Global config, database, and model cache directories created"
+  echo "Run \`poneglyph init\` inside each project you want it wired into."
 fi
 
 # ── feature selection ────────────────────────────────────────────────────────

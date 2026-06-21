@@ -1,5 +1,7 @@
+mod daemon;
 mod demo;
 mod detect;
+mod graph_registry;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -29,8 +31,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Initialize database and config
-    Init,
+    /// Initialize this project: database, .poneglyphignore, code-graph lock,
+    /// and inject usage rules into CLAUDE.md/AGENTS.md/.cursorrules if present
+    Init {
+        /// Also (re)write the global config at ~/.config/poneglyph/config.toml
+        #[arg(long)]
+        config: bool,
+    },
+    /// Manage the `poneglyph mcp` daemon as a login service (launchd/systemd)
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonCommand,
+    },
     /// Start the MCP server — Streamable HTTP on `agents.mcp_server_port`
     /// (default 27271) by default, a persistent daemon agents connect to
     /// over the network. Also serves /api, /ingest, /healthz so hooks can
@@ -121,6 +133,20 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum DaemonCommand {
+    /// Register `poneglyph mcp` as a login service and start it now
+    Enable,
+    /// Stop the service and remove it from login startup
+    Disable,
+    /// Start the already-registered service
+    Start,
+    /// Stop the running service (stays registered for next login)
+    Stop,
+    /// Show service + liveness status
+    Status,
+}
+
+#[derive(Subcommand)]
 enum GraphCommand {
     /// Full build: parse every matching file under `path`
     Init {
@@ -204,7 +230,8 @@ async fn main() {
 
 async fn run(command: Command, config: &Config) -> Result<()> {
     match command {
-        Command::Init => cmd_init(&config),
+        Command::Init { config: write_global } => cmd_init(&config, write_global),
+        Command::Daemon { action } => cmd_daemon(&config, action),
         Command::Mcp { stdio } => cmd_mcp(&config, stdio).await,
         #[cfg(feature = "viewer")]
         Command::Viewer => cmd_viewer(&config).await,
@@ -244,27 +271,19 @@ async fn run(command: Command, config: &Config) -> Result<()> {
     }
 }
 
-fn cmd_init(config: &Config) -> Result<()> {
+/// Project init: DB, .poneglyphignore, code-graph lock, and rule injection.
+/// `--config` additionally (re)writes the global config — most users only
+/// need that once, on install, not per-project.
+fn cmd_init(config: &Config, write_global_config: bool) -> Result<()> {
     println!("\x1b[38;2;153;0;17m{BANNER}\x1b[0m");
+
+    if write_global_config {
+        init_global_config()?;
+    }
 
     config
         .ensure_dirs()
         .context("failed to create directories")?;
-
-    // Create default config if it doesn't exist: every key present but
-    // commented, except values resolved by local-provider detection.
-    let config_path = Config::default_config_path();
-    if !config_path.exists() {
-        if let Some(dir) = config_path.parent() {
-            std::fs::create_dir_all(dir).context("failed to create config directory")?;
-        }
-        let detected = detect::detect_local_llm();
-        let toml = detect::render_config_template(&detected);
-        std::fs::write(&config_path, toml).context("failed to write config")?;
-        println!("Config created: {}", config_path.display());
-    } else {
-        println!("Config already exists: {}", config_path.display());
-    }
 
     // Initialize DB
     Store::open(&config.db_path).context("failed to initialize database")?;
@@ -296,8 +315,59 @@ fn cmd_init(config: &Config) -> Result<()> {
         println!("Created: .poneglyph/code-graph-lock.json");
     }
 
+    // Inject usage rules into whichever of CLAUDE.md/AGENTS.md/.cursorrules
+    // already exist in this project. Never creates a file the user doesn't have.
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    match detect::inject_agent_rules(&cwd) {
+        Ok(results) if results.is_empty() => {}
+        Ok(results) => {
+            for (file, changed) in results {
+                println!(
+                    "{file}: {}",
+                    if changed {
+                        "rules injected"
+                    } else {
+                        "rules already up to date"
+                    }
+                );
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "failed to inject project rules"),
+    }
+
+    if !write_global_config && !Config::default_config_path().exists() {
+        println!("\nNo global config yet — run `poneglyph init --config` once to create one.");
+    }
     println!("\nNext: run `poneglyph wire <ide>` to set up IDE integration.");
     Ok(())
+}
+
+/// Write `~/.config/poneglyph/config.toml` if it doesn't exist yet: every key
+/// present but commented, except values resolved by local-provider detection.
+fn init_global_config() -> Result<()> {
+    let config_path = Config::default_config_path();
+    if config_path.exists() {
+        println!("Config already exists: {}", config_path.display());
+        return Ok(());
+    }
+    if let Some(dir) = config_path.parent() {
+        std::fs::create_dir_all(dir).context("failed to create config directory")?;
+    }
+    let detected = detect::detect_local_llm();
+    let toml = detect::render_config_template(&detected);
+    std::fs::write(&config_path, toml).context("failed to write config")?;
+    println!("Config created: {}", config_path.display());
+    Ok(())
+}
+
+fn cmd_daemon(config: &Config, action: DaemonCommand) -> Result<()> {
+    match action {
+        DaemonCommand::Enable => daemon::enable(config),
+        DaemonCommand::Disable => daemon::disable(),
+        DaemonCommand::Start => daemon::start(),
+        DaemonCommand::Stop => daemon::stop(),
+        DaemonCommand::Status => daemon::status(config),
+    }
 }
 
 fn cmd_wire(config: &Config, ide: &str) -> Result<()> {
@@ -310,8 +380,10 @@ fn cmd_wire(config: &Config, ide: &str) -> Result<()> {
     println!("{:<14} {}", outcome.agent, outcome.status.as_str());
     if ide == "claude-code" && outcome.status != detect::SetupStatus::Disabled {
         println!(
-            "               note: `poneglyph mcp` is a persistent daemon — keep it running \
-             (e.g. `poneglyph mcp &`) so Claude Code can reach http://127.0.0.1:{}/mcp",
+            "               note: `poneglyph mcp` is a persistent daemon — run \
+             `poneglyph daemon enable` to keep it running across logins, or start it \
+             manually (e.g. `poneglyph mcp &`), so Claude Code can reach \
+             http://127.0.0.1:{}/mcp",
             config.agents.mcp_server_port
         );
     }
@@ -388,6 +460,7 @@ async fn open_store_and_worker(
 /// editor-spawned-per-session shape for clients that need it.
 async fn cmd_mcp(config: &Config, stdio: bool) -> Result<()> {
     let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
+    let graph_update_task = spawn_graph_auto_update(store.clone(), shared_config.clone());
 
     let health = poneglyph_core::llm::health(&config.llm).await;
     tracing::info!(
@@ -404,6 +477,7 @@ async fn cmd_mcp(config: &Config, stdio: bool) -> Result<()> {
         // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
         let result = poneglyph_mcp::server::run_stdio(mcp).await;
         worker.abort(); // client gone; no more producers
+        graph_update_task.abort();
         return result;
     }
 
@@ -428,7 +502,54 @@ async fn cmd_mcp(config: &Config, stdio: bool) -> Result<()> {
     };
 
     worker.abort();
+    graph_update_task.abort();
     result
+}
+
+/// Periodically re-builds (incrementally) every project tracked in
+/// `graph_projects.toml`, so codegraph results stay fresh without the user
+/// running `graph update` by hand while the daemon is up.
+/// ponytail: fixed-interval polling, not file-watch — upgrade to a
+/// notify-based watch per project if polling proves too coarse.
+fn spawn_graph_auto_update(
+    store: Arc<Mutex<Store>>,
+    config: Arc<Config>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let minutes = config.graph.auto_update_minutes;
+        if minutes == 0 {
+            return; // disabled
+        }
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(minutes * 60));
+        interval.tick().await; // first tick fires immediately; skip it
+        loop {
+            interval.tick().await;
+            let projects = match graph_registry::load() {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to read graph_projects.toml");
+                    continue;
+                }
+            };
+            for p in &projects.project {
+                let path = PathBuf::from(&p.dir);
+                if !path.is_dir() {
+                    continue;
+                }
+                let result = {
+                    let Ok(guard) = store.lock() else { continue };
+                    poneglyph_core::codegraph::build(&guard, &path, &config.graph, false)
+                };
+                match result {
+                    Ok(report) if report.files_parsed > 0 => {
+                        tracing::info!(dir = %p.dir, nodes = report.nodes, edges = report.edges, "auto graph update")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(dir = %p.dir, error = %e, "auto graph update failed"),
+                }
+            }
+        }
+    })
 }
 
 /// HTTP dashboard + graph viewer only — for browsing in a browser.
@@ -803,11 +924,13 @@ fn cmd_graph(config: &Config, action: GraphCommand) -> Result<()> {
             let report = codegraph::build(&store, &path, &config.graph, true)?;
             print_build_report(&report);
             update_graph_lock();
+            register_for_auto_update(&store, &path);
         }
         GraphCommand::Update { path } => {
             let report = codegraph::build(&store, &path, &config.graph, false)?;
             print_build_report(&report);
             update_graph_lock();
+            register_for_auto_update(&store, &path);
         }
         GraphCommand::Watch { path } => cmd_graph_watch(&store, &path, config)?,
         GraphCommand::Query { q } => {
@@ -910,6 +1033,21 @@ fn cmd_graph_watch(store: &Store, path: &std::path::Path, config: &Config) -> Re
     }
 
     Ok(())
+}
+
+/// Track this project in `graph_projects.toml` so the daemon's background
+/// auto-update task (spawned in `cmd_mcp`) can keep its graph fresh without
+/// the user running `graph update` by hand. Best-effort: failures are logged,
+/// never fatal to the build that just succeeded.
+fn register_for_auto_update(store: &Store, path: &std::path::Path) {
+    let Ok(abs) = path.canonicalize() else { return };
+    let Ok(project) = poneglyph_core::project::detect_project(store, &abs.to_string_lossy())
+    else {
+        return;
+    };
+    if let Err(e) = graph_registry::register(&abs, &project.id) {
+        tracing::warn!(error = %e, "failed to register project for auto graph updates");
+    }
 }
 
 /// Update `last_build` timestamp in `.poneglyph/code-graph-lock.json`.
