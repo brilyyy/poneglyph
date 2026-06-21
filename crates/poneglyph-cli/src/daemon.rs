@@ -170,14 +170,20 @@ mod platform {
         Ok(())
     }
 
+    // `KeepAlive=true` means launchd relaunches the job the instant it exits
+    // for *any* reason — `launchctl kill` only sends a signal to the running
+    // instance and leaves the job loaded, so it bounces straight back. Both
+    // start and stop instead load/unload the job itself (`bootstrap`/
+    // `bootout`), which is what actually keeps KeepAlive from refighting us.
     pub fn start() -> Result<()> {
         if !is_registered()? {
             bail!("daemon not registered — run `poneglyph daemon enable` first");
         }
-        let out = run("launchctl", &["kickstart", "-k", &domain_target()?])?;
+        let _ = run("launchctl", &["bootout", &domain_target()?]);
+        let out = run("launchctl", &["bootstrap", &format!("gui/{}", uid()?), plist_path()?.to_str().unwrap()])?;
         if !out.status.success() {
             bail!(
-                "launchctl kickstart failed: {}",
+                "launchctl bootstrap failed: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
         }
@@ -185,10 +191,10 @@ mod platform {
     }
 
     pub fn stop() -> Result<()> {
-        let out = run("launchctl", &["kill", "SIGTERM", &domain_target()?])?;
+        let out = run("launchctl", &["bootout", &domain_target()?])?;
         if !out.status.success() {
             bail!(
-                "launchctl kill failed: {}",
+                "launchctl bootout failed: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
         }
