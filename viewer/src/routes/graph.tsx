@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, formatRelative } from "#/lib/api.ts";
 import {
   EDGE_TYPES,
+  TIER_COLORS,
   TYPE_COLORS,
   type Edge,
   type EdgeType,
@@ -38,6 +39,7 @@ function GraphPage() {
   const [edges, setEdges] = useState<Map<string, Edge>>(new Map());
   const [hidden, setHidden] = useState<Set<EdgeType>>(new Set());
   const [selected, setSelected] = useState<Memory | null>(null);
+  const [colorBy, setColorBy] = useState<"type" | "tier">("type");
 
   const initial = useQuery({
     queryKey: ["graph", focus ?? "sample", limit],
@@ -86,11 +88,15 @@ function GraphPage() {
     () =>
       memoryArr.map((m) => ({
         id: m.id,
-        color: TYPE_COLORS[m.memory_type] ?? "#94a3b8",
-        size: 3 + m.importance * 9,
+        color:
+          colorBy === "tier"
+            ? TIER_COLORS[m.tier]
+            : TYPE_COLORS[m.memory_type] ?? "#94a3b8",
+        // Decoy (consolidated) nodes render larger, so clusters stand out.
+        size: 3 + m.importance * 9 + (m.is_decoy ? 4 : 0),
         opacity: TIER_OPACITY[m.tier],
       })),
-    [memoryArr],
+    [memoryArr, colorBy],
   );
 
   const cosmosLinks: CosmosLink[] = useMemo(
@@ -118,11 +124,10 @@ function GraphPage() {
   const totalEdges = initial.data?.total_edges ?? edgeArr.length;
   const isSampled = totalNodes > memoryArr.length;
 
-  const selectedEdgeCount = selected
-    ? edgeArr.filter(
-        (e) => e.src_id === selected.id || e.dst_id === selected.id,
-      ).length
-    : 0;
+  const selectedEdges = selected
+    ? edgeArr.filter((e) => e.src_id === selected.id || e.dst_id === selected.id)
+    : [];
+  const selectedRelations = selectedEdges.filter((e) => e.edge_type === "relation" && e.label);
 
   return (
     <div className="flex h-[calc(100vh-3rem)] flex-col gap-3">
@@ -135,19 +140,40 @@ function GraphPage() {
       </div>
 
       <div className="flex flex-wrap items-center gap-4 text-xs">
-        <div className="flex items-center gap-2">
-          {(Object.keys(TYPE_COLORS) as MemoryType[]).map((t) => (
-            <span
-              key={t}
-              className="flex items-center gap-1 text-muted-foreground"
-            >
-              <span
-                className="h-2.5 w-2.5 rounded-full"
-                style={{ backgroundColor: TYPE_COLORS[t] }}
-              />
-              {t}
-            </span>
-          ))}
+        <div className="flex items-center gap-2 rounded-md border border-border p-0.5">
+          <button
+            className={`rounded-sm px-2 py-1 ${colorBy === "type" ? "bg-accent" : "text-muted-foreground"}`}
+            onClick={() => setColorBy("type")}
+          >
+            color: type
+          </button>
+          <button
+            className={`rounded-sm px-2 py-1 ${colorBy === "tier" ? "bg-accent" : "text-muted-foreground"}`}
+            onClick={() => setColorBy("tier")}
+          >
+            color: tier
+          </button>
+        </div>
+        <div className="flex items-center gap-2 border-l border-border pl-4">
+          {colorBy === "tier"
+            ? (Object.keys(TIER_COLORS) as Memory["tier"][]).map((t) => (
+                <span key={t} className="flex items-center gap-1 text-muted-foreground">
+                  <span
+                    className="h-2.5 w-2.5 rounded-full"
+                    style={{ backgroundColor: TIER_COLORS[t] }}
+                  />
+                  {t}
+                </span>
+              ))
+            : (Object.keys(TYPE_COLORS) as MemoryType[]).map((t) => (
+                <span key={t} className="flex items-center gap-1 text-muted-foreground">
+                  <span
+                    className="h-2.5 w-2.5 rounded-full"
+                    style={{ backgroundColor: TYPE_COLORS[t] }}
+                  />
+                  {t}
+                </span>
+              ))}
         </div>
         <div className="flex items-center gap-2 border-l border-border pl-4">
           {EDGE_TYPES.map((t) => (
@@ -216,8 +242,17 @@ function GraphPage() {
               <p className="text-xs text-muted-foreground">
                 {formatRelative(selected.created_at)} · importance{" "}
                 {selected.importance.toFixed(2)} · {selected.tier} tier ·{" "}
-                {selectedEdgeCount} edges
+                {selectedEdges.length} edges{selected.is_decoy ? " · decoy" : ""}
               </p>
+              {selectedRelations.length > 0 && (
+                <ul className="space-y-0.5 text-xs text-muted-foreground">
+                  {selectedRelations.map((e) => (
+                    <li key={e.id} className="truncate">
+                      → {e.label}
+                    </li>
+                  ))}
+                </ul>
+              )}
               <div className="flex gap-2">
                 <Button asChild size="sm" variant="outline">
                   <Link to="/memories/$id" params={{ id: selected.id }}>

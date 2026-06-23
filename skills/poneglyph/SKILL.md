@@ -31,12 +31,39 @@ sessions, and answer code-impact questions precisely instead of by grep.
 - Before spending time re-deriving something → `recall` first. It may already
   be stored from a prior session.
 
+## Memory tiers (automatic)
+
+Raw `remember` calls and hook-captured events aren't the end of the story — a
+background consolidation pipeline promotes them through tiers over time:
+
+`episodic` (session summaries) → `semantic` (facts distilled across multiple
+sessions, carrying a `metadata.confidence` score and lineage back to their
+source memories) → `procedural` (recurring workflows: tool-use sequences or
+LLM-synthesized steps/trigger/outcome).
+
+This runs automatically — the `poneglyph mcp` daemon's scheduler, and (for
+hook-only setups without the daemon) a debounced trigger on session end. It
+happens whether or not a local LLM is configured: each stage has a
+deterministic fallback (embedding-cluster summaries, frequent-sequence
+mining) when `llm.enabled=false`, so the tiers still fill in.
+
+What this means in practice:
+- **Filter `recall`/`list_memories` by `memory_type: semantic` or
+  `procedural`** when you want distilled, high-signal results instead of raw
+  captures — they're higher-trust than a single `episodic`/`code_context` hit.
+- **Don't hand-roll summaries or "lessons learned" memories** — that's what
+  consolidation already does. Use `remember` for things consolidation can't
+  infer: explicit user decisions, preferences, one-off facts.
+- A `semantic` or `procedural` memory may be a "decoy" (a cluster summary with
+  `is_decoy: true`) — its source memories aren't deleted, just summarized; the
+  raw history is still recallable if you need the detail behind a fact.
+
 ## All 8 tools
 
 | Tool | Params | Use when |
 | --- | --- | --- |
 | `remember` | content, memory_type, importance?, project_path?, tags?, llm_assist? | A durable fact/decision/preference worth keeping past this session. |
-| `recall` | query, limit?, memory_type?, project_path?, since? | Before re-deriving something — it may already be stored. |
+| `recall` | query, limit?, memory_type?, project_path?, since? | Before re-deriving something — it may already be stored. Hybrid dense+sparse+graph fusion (plus an optional local reranker pass, if configured) — fully automatic, nothing to tune from the caller side. |
 | `forget` | id | A memory is no longer true or was a duplicate. |
 | `update_memory` | id, new_content | Correct a stored memory in place instead of duplicating it. |
 | `get_project_context` | project_path, max_tokens? | Session start — load ranked prior memory for this project. |

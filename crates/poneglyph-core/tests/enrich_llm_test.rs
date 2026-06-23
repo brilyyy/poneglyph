@@ -68,6 +68,7 @@ fn worker_cfg() -> WorkerConfig {
         enrichment: EnrichmentConfig::default(),
         compression_enabled: false,
         compression_mode: CompressionMode::default(),
+        consolidation: None,
     }
 }
 
@@ -268,7 +269,15 @@ async fn recall_never_reads_compressed_content_even_when_present() {
 
     // "schema drift" appears only in the original content, never in the
     // compressed rewrite — recall finding it proves recall reads `content`.
-    let results = recall(&store.conn, None, "schema drift", &RecallFilters::default(), 10).unwrap();
+    let results = recall(
+        &store.conn,
+        None,
+        "schema drift",
+        &RecallFilters::default(),
+        10,
+        &poneglyph_core::config::RetrievalConfig::default(),
+    )
+    .unwrap();
     assert!(
         results.iter().any(|r| r.memory.id == m.id),
         "recall must search original content, never the compressed cache"

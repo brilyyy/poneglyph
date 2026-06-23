@@ -9,7 +9,7 @@ use anyhow::Result;
 use rusqlite::params;
 
 use crate::config::MemoryEdgesConfig;
-use crate::model::EdgeType;
+use crate::model::{EdgeType, MemoryType};
 use crate::store::Store;
 
 /// How many nearest neighbours to consider for similarity edges.
@@ -119,6 +119,12 @@ pub fn build_similarity_edges(store: &Store, memory_id: &str, threshold: f64) ->
         if cand == memory_id {
             continue;
         }
+        let Some(other_mem) = store.get_memory(&cand)? else {
+            continue;
+        };
+        if other_mem.memory_type == MemoryType::CodeContext {
+            continue;
+        }
         let Some(other) = get_embedding(store, &cand)? else {
             continue;
         };
@@ -153,7 +159,8 @@ pub fn build_temporal_edges(store: &Store, memory_id: &str, window_secs: i64) ->
 
     let mut stmt = store.conn.prepare(
         "SELECT id FROM memories
-         WHERE project_id = ?1 AND id != ?2 AND created_at BETWEEN ?3 AND ?4",
+         WHERE project_id = ?1 AND id != ?2 AND created_at BETWEEN ?3 AND ?4
+         AND memory_type != 'code_context'",
     )?;
     let neighbors: Vec<String> = stmt
         .query_map(params![project_id, memory_id, low, high], |r| r.get(0))?
@@ -186,7 +193,8 @@ pub fn build_tag_overlap_edges(store: &Store, memory_id: &str) -> Result<usize> 
     let sql = format!(
         "SELECT DISTINCT m.id, m.metadata
          FROM memories m, json_each(m.metadata, '$.tags') je
-         WHERE m.id != ?1 AND je.value IN ({})",
+         WHERE m.id != ?1 AND je.value IN ({})
+         AND m.memory_type != 'code_context'",
         placeholders.join(", ")
     );
 
@@ -264,7 +272,14 @@ pub fn nearest_neighbors(store: &Store, memory_id: &str, k: usize) -> Result<Vec
 }
 
 /// Run every no-LLM builder for one memory. Used by the enrichment worker.
+/// No-op for `code_context` memories (raw passive captures) — excluded as a
+/// graph source/target everywhere to keep the graph to actual memory content.
 pub fn build_edges_for_memory(store: &Store, cfg: &MemoryEdgesConfig, memory_id: &str) -> Result<usize> {
+    if let Some(mem) = store.get_memory(memory_id)?
+        && mem.memory_type == MemoryType::CodeContext
+    {
+        return Ok(0);
+    }
     let mut n = 0;
     n += build_similarity_edges(store, memory_id, cfg.similarity_threshold)?;
     n += build_temporal_edges(store, memory_id, cfg.temporal_window_secs)?;
@@ -464,5 +479,29 @@ mod tests {
         // Idempotent on recompute.
         assert_eq!(build_edges_for_memory(&s, &cfg, &m2).unwrap(), 0);
         assert_eq!(build_edges_for_memory(&s, &cfg, &m1).unwrap(), 0);
+    }
+
+    #[test]
+    fn code_context_excluded_as_source_and_target() {
+        let s = store();
+        let cfg = MemoryEdgesConfig::default();
+        let p = s.upsert_project("/p", "p", None).unwrap();
+
+        let cc = s
+            .create_memory("raw tool output", MemoryType::CodeContext, 0.5, Source::Cli, Some(&p.id), None)
+            .unwrap()
+            .id;
+        let m1 = mem(&s, "alpha", Some(&p.id), &["x"]);
+        s.index_embedding(&cc, &vec_along(0, 0.05)).unwrap();
+        s.index_embedding(&m1, &vec_along(0, 0.06)).unwrap();
+
+        // code_context as the source memory: no-op, regardless of how
+        // similar/temporal/tag-matching its neighbours are.
+        assert_eq!(build_edges_for_memory(&s, &cfg, &cc).unwrap(), 0);
+        assert_eq!(s.get_edges_for_memory(&cc).unwrap().len(), 0);
+
+        // code_context as a candidate target from a normal memory's side.
+        assert_eq!(build_edges_for_memory(&s, &cfg, &m1).unwrap(), 0);
+        assert_eq!(s.get_edges_for_memory(&m1).unwrap().len(), 0);
     }
 }

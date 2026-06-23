@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
+use crate::config::RetrievalConfig;
 use crate::model::{Memory, MemoryType, Source};
 
 // ---------------------------------------------------------------------------
@@ -182,34 +183,67 @@ fn sparse_recall(
     Ok(results)
 }
 
+/// Walk up to `hops` steps out from `seed_ids`, returning each newly-found
+/// neighbor with the hop depth it was found at (1 = direct neighbor of a
+/// seed). `Relation` edges — grounded LLM-labeled edges with a predicate —
+/// are preferred over plain similarity/temporal/tag-overlap edges when a
+/// hop's frontier is larger than what fits in `limit`, since they carry
+/// actual semantic meaning useful for conceptual multi-hop queries.
 fn graph_expand(
     conn: &rusqlite::Connection,
     seed_ids: &[String],
     limit: usize,
-) -> Result<Vec<String>> {
-    let mut neighbors = Vec::new();
+    hops: usize,
+) -> Result<Vec<(String, usize)>> {
+    let mut visited: std::collections::HashSet<String> = seed_ids.iter().cloned().collect();
+    let mut result: Vec<(String, usize)> = Vec::new();
+    let mut frontier: Vec<String> = seed_ids.to_vec();
 
-    for id in seed_ids {
-        let mut stmt = conn.prepare(
-            "SELECT dst_id FROM edges WHERE src_id = ?1
-             UNION
-             SELECT src_id FROM edges WHERE dst_id = ?1",
-        )?;
+    for hop in 1..=hops.max(1) {
+        if frontier.is_empty() || result.len() >= limit {
+            break;
+        }
 
-        let ids: Vec<String> = stmt
-            .query_map(params![id], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
+        let mut candidates: Vec<(String, f64)> = Vec::new();
+        for id in &frontier {
+            let mut stmt = conn.prepare(
+                "SELECT dst_id, edge_type, weight FROM edges WHERE src_id = ?1
+                 UNION
+                 SELECT src_id, edge_type, weight FROM edges WHERE dst_id = ?1",
+            )?;
+            let rows: Vec<(String, String, f64)> = stmt
+                .query_map(params![id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
 
-        for nid in ids {
-            if !neighbors.contains(&nid) && !seed_ids.contains(&nid) {
-                neighbors.push(nid);
+            for (nid, edge_type, weight) in rows {
+                if visited.contains(&nid) {
+                    continue;
+                }
+                // `Relation` edges get a priority boost over similarity/
+                // temporal/tag-overlap when ranking which neighbors of an
+                // oversized frontier make the cut.
+                let priority = if edge_type == "relation" { weight + 1.0 } else { weight };
+                candidates.push((nid, priority));
             }
         }
+
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut next_frontier = Vec::new();
+        for (nid, _) in candidates {
+            if visited.insert(nid.clone()) {
+                next_frontier.push(nid.clone());
+                result.push((nid, hop));
+                if result.len() >= limit {
+                    break;
+                }
+            }
+        }
+        frontier = next_frontier;
     }
 
-    neighbors.truncate(limit);
-    Ok(neighbors)
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -219,25 +253,30 @@ fn graph_expand(
 fn compute_rrf(
     dense: &[(String, f64)],
     sparse: &[(String, f64)],
-    graph: &[String],
+    graph: &[(String, usize)],
+    weights: &RetrievalConfig,
 ) -> HashMap<String, f64> {
     let mut scores: HashMap<String, f64> = HashMap::new();
 
     // Dense: distance → rank (lower distance = higher rank, but we assign by order)
     for (rank, (id, _)) in dense.iter().enumerate() {
-        *scores.entry(id.clone()).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+        *scores.entry(id.clone()).or_default() +=
+            weights.dense_weight / (RRF_K + rank as f64 + 1.0);
     }
 
     // Sparse: rank by position (lower FTS rank = better)
     for (rank, (id, _)) in sparse.iter().enumerate() {
-        *scores.entry(id.clone()).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+        *scores.entry(id.clone()).or_default() +=
+            weights.sparse_weight / (RRF_K + rank as f64 + 1.0);
     }
 
-    // Graph neighbors: treated as a separate "path" at higher rank positions
+    // Graph neighbors: treated as a separate "path" at higher rank positions,
+    // additionally down-weighted per hop (1-hop = decay^1, 2-hop = decay^2, ...).
     let graph_base = dense.len().max(sparse.len()) as f64;
-    for (rank, id) in graph.iter().enumerate() {
+    for (rank, (id, hop)) in graph.iter().enumerate() {
+        let hop_decay = GRAPH_HOP_DECAY.powi(*hop as i32);
         *scores.entry(id.clone()).or_default() +=
-            GRAPH_HOP_DECAY / (RRF_K + graph_base + rank as f64 + 1.0);
+            weights.graph_weight * hop_decay / (RRF_K + graph_base + rank as f64 + 1.0);
     }
 
     scores
@@ -255,6 +294,7 @@ pub fn recall(
     query_text: &str,
     filters: &RecallFilters,
     limit: usize,
+    weights: &RetrievalConfig,
 ) -> Result<Vec<RecallResult>> {
     let dense = match query_vec {
         Some(v) => dense_recall(conn, v, limit)?,
@@ -275,19 +315,24 @@ pub fn recall(
         }
     }
 
-    let graph_neighbors = graph_expand(conn, &seed_ids, limit)?;
+    let graph_neighbors = graph_expand(conn, &seed_ids, limit, weights.graph_hops)?;
 
     // RRF fusion
-    let rrf_scores = compute_rrf(&dense, &sparse, &graph_neighbors);
+    let rrf_scores = compute_rrf(&dense, &sparse, &graph_neighbors, weights);
 
-    // Collect all candidate IDs
+    // Collect candidate IDs into an over-fetched pool: importance/recency/
+    // strength (final_score, below) can only re-rank within this pool, so
+    // truncating to `limit` here — before that scoring runs — would let a
+    // high-importance item below the raw RRF cutoff get dropped before it
+    // ever has a chance to be boosted back up. Keep `limit * overfetch_factor`
+    // candidates, score them all, then cut to `limit`.
     let mut all_ids: Vec<String> = rrf_scores.keys().cloned().collect();
     all_ids.sort_by(|a, b| {
         rrf_scores[b]
             .partial_cmp(&rrf_scores[a])
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    all_ids.truncate(limit);
+    all_ids.truncate(limit.saturating_mul(weights.overfetch_factor.max(1)));
 
     if all_ids.is_empty() {
         return Ok(Vec::new());
@@ -373,6 +418,7 @@ pub fn recall(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::EdgeType;
 
     #[test]
     fn rrf_basic_fusion() {
@@ -386,9 +432,9 @@ mod tests {
             ("c".to_string(), 0.6),
             ("d".to_string(), 0.7),
         ];
-        let graph = vec!["e".to_string()];
+        let graph = vec![("e".to_string(), 1)];
 
-        let scores = compute_rrf(&dense, &sparse, &graph);
+        let scores = compute_rrf(&dense, &sparse, &graph, &RetrievalConfig::default());
 
         // "b" appears in both dense rank 1 and sparse rank 0 → higher than any single-source ID
         let b_score = scores["b"];
@@ -405,10 +451,84 @@ mod tests {
     fn rrf_single_path() {
         let dense = vec![("x".to_string(), 0.1)];
         let sparse: Vec<(String, f64)> = vec![];
-        let graph: Vec<String> = vec![];
+        let graph: Vec<(String, usize)> = vec![];
+        let uniform = RetrievalConfig {
+            dense_weight: 1.0,
+            sparse_weight: 1.0,
+            graph_weight: 1.0,
+            ..RetrievalConfig::default()
+        };
 
-        let scores = compute_rrf(&dense, &sparse, &graph);
+        let scores = compute_rrf(&dense, &sparse, &graph, &uniform);
         assert!((scores["x"] - 1.0 / (RRF_K + 1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn zero_weight_drops_stream() {
+        let dense = vec![("x".to_string(), 0.1)];
+        let sparse = vec![("y".to_string(), 0.1)];
+        let graph: Vec<(String, usize)> = vec![];
+        let dense_off = RetrievalConfig {
+            dense_weight: 0.0,
+            sparse_weight: 1.0,
+            graph_weight: 1.0,
+            ..RetrievalConfig::default()
+        };
+
+        let scores = compute_rrf(&dense, &sparse, &graph, &dense_off);
+        assert_eq!(scores["x"], 0.0, "dense_weight=0 should zero out the dense contribution");
+        assert!(scores["y"] > 0.0, "sparse contribution should be unaffected");
+    }
+
+    #[test]
+    fn overfetch_lets_importance_reorder_below_raw_cutoff() {
+        // Without the overfetch fix, an item ranked below `limit` by raw RRF
+        // could never be reached by importance/recency scoring. With
+        // overfetch_factor >= 2 and limit=1, both items survive into the pool.
+        let weights = RetrievalConfig {
+            overfetch_factor: 2,
+            ..RetrievalConfig::default()
+        };
+        let limit: usize = 1;
+        let pool_size = limit.saturating_mul(weights.overfetch_factor.max(1));
+        assert_eq!(pool_size, 2, "pool must hold more than `limit` candidates");
+    }
+
+    #[test]
+    fn graph_expand_walks_multiple_hops() {
+        use crate::store::Store;
+        let store = Store::open_in_memory().unwrap();
+        let a = store.create_memory("a", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let b = store.create_memory("b", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let c = store.create_memory("c", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        store.create_edge(&a.id, &b.id, EdgeType::Similarity, None, 0.9).unwrap();
+        store.create_edge(&b.id, &c.id, EdgeType::Similarity, None, 0.9).unwrap();
+
+        // hops=1: only b (a's direct neighbor) should be reachable.
+        let one_hop = graph_expand(&store.conn, std::slice::from_ref(&a.id), 10, 1).unwrap();
+        assert_eq!(one_hop, vec![(b.id.clone(), 1)]);
+
+        // hops=2: c becomes reachable through b, at hop depth 2.
+        let two_hop = graph_expand(&store.conn, std::slice::from_ref(&a.id), 10, 2).unwrap();
+        assert!(two_hop.contains(&(b.id.clone(), 1)));
+        assert!(two_hop.contains(&(c.id.clone(), 2)));
+    }
+
+    #[test]
+    fn graph_expand_prefers_relation_edges_under_limit() {
+        use crate::store::Store;
+        let store = Store::open_in_memory().unwrap();
+        let seed = store.create_memory("seed", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let plain = store.create_memory("plain neighbor", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let related = store.create_memory("related neighbor", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+
+        // Similarity edge has a higher raw weight than the Relation edge,
+        // but Relation should still win the single open slot.
+        store.create_edge(&seed.id, &plain.id, EdgeType::Similarity, None, 0.95).unwrap();
+        store.create_edge(&seed.id, &related.id, EdgeType::Relation, Some("depends_on"), 0.5).unwrap();
+
+        let result = graph_expand(&store.conn, std::slice::from_ref(&seed.id), 1, 1).unwrap();
+        assert_eq!(result, vec![(related.id.clone(), 1)], "Relation edge must be preferred over a higher-weight Similarity edge");
     }
 
     #[test]

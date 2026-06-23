@@ -80,6 +80,12 @@ __LLM_BLOCK__
 # archival = 0     # 0 = permanent (never auto-deleted)
 
 [memory.edges]
+# Master switch for graph extraction: deterministic edge builders
+# (similarity/temporal/tag-overlap) and LLM entity/relation extraction.
+# When false, neither runs — no edges are computed, no graph clutter.
+# Always skips `code_context` memories regardless of this setting.
+# enabled = true
+
 # Minimum cosine similarity (0.0–1.0) to create a similarity edge between
 # two memories. Higher = fewer, more precise connections. 0.82 is tuned for
 # MiniLM-L6-v2; adjust if you switch embedding models.
@@ -204,6 +210,23 @@ __AGENTS_BLOCK__
 # Minimum embedding cosine similarity for two memories to be in the same
 # cluster. Higher = tighter clusters, fewer merges. 0.75 is conservative.
 # similarity_threshold = 0.75
+
+[retrieval]
+# Tuning for hybrid retrieval (dense + sparse + graph fusion via RRF) used by
+# `recall`/`get_project_context`. Defaults mirror AgentMemory's documented
+# ratios as a starting point — re-tune against `poneglyph eval` if you have a
+# LongMemEval-style dataset.
+# dense_weight = 0.6
+# sparse_weight = 0.4
+# graph_weight = 0.3
+
+# Extra candidates beyond the requested limit kept in the scoring pool so
+# importance/recency/strength can still reorder them after fusion.
+# overfetch_factor = 5
+
+# How many hops the graph-neighbor walk takes from the dense/sparse seed set.
+# Each hop is down-weighted; higher only helps multi-hop conceptual queries.
+# graph_hops = 2
 
 [cold_storage]
 # Compress old memories to zstd files on disk, freeing SQLite space.

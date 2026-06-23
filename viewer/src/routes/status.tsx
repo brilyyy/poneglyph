@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 
-import { api } from '#/lib/api.ts'
+import { api, formatRelative } from '#/lib/api.ts'
 import type { AgentsStatus, ProjectContext } from '#/lib/types.ts'
 import { Alert, AlertDescription } from '#/components/ui/alert.tsx'
 import { Badge } from '#/components/ui/badge.tsx'
@@ -127,6 +127,39 @@ function StatusPage() {
           <Row label="LLM provider" value={settings.data?.llm?.enabled ? settings.data?.llm?.provider : '—'} />
           <Row label="Dashboard port" value={settings.data?.dashboard?.port} />
           <Row label="Compression" value={settings.data?.memory?.compression_enabled ? 'on' : 'off'} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Consolidation pipeline</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1 text-sm">
+          <Row
+            label="Scheduled consolidation"
+            value={settings.data?.consolidation?.enabled ? 'on' : 'off'}
+          />
+          <Row
+            label="Interval"
+            value={
+              settings.data?.consolidation?.enabled
+                ? `${settings.data.consolidation.interval_hours}h`
+                : '—'
+            }
+          />
+          <Row label="Last run" value={formatRelative(stats.data?.last_consolidation_at ?? null)} />
+          {Object.keys(stats.data?.by_tier ?? {}).length > 0 && (
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">By tier</span>
+              <div className="flex gap-1">
+                {Object.entries(stats.data?.by_tier ?? {}).map(([tier, count]) => (
+                  <Badge key={tier} variant="secondary">
+                    {tier}: {count}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 

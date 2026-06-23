@@ -384,6 +384,7 @@ impl PoneglyphMcp {
             &req.query,
             &filters,
             limit,
+            &self.config.retrieval,
         )
         .map_err(internal)?;
 

@@ -33,7 +33,7 @@ captured; the scripts additionally skip read-only tools as a backstop.
 |---|---|---|
 | `posttooluse.sh` | PostToolUse | Tool executions as `code_context` memories via `POST /ingest` |
 | `userpromptsubmit.sh` | UserPromptSubmit | User prompts as `episodic` memories via `POST /ingest` |
-| `stop.sh` | Stop | Last assistant message via `POST /ingest`, then a session summary via `poneglyph session-summary` (no REST equivalent yet) |
+| `stop.sh` | Stop | Last assistant message via `POST /ingest`, then a debounced `poneglyph consolidate` run (no REST equivalent yet) — promotes raw captures into episodic/semantic/procedural tiers |
 | `sessionstart.sh` | SessionStart | Injects project context via `GET /api/context` (read-only) |
 
 ## Environment
@@ -61,6 +61,14 @@ Unknown projects inject nothing.
   `episodic` memory via the Stop hook.
 - **Session context:** On new sessions, your project's most relevant memories
   are injected into Claude's context window (zero LLM calls).
+- **Consolidation pipeline:** The Stop hook also triggers (debounced, ~30 min)
+  a `poneglyph consolidate` run, which promotes raw captures up the tiers —
+  `episodic` session summaries → cross-session `semantic` facts → `procedural`
+  workflows. Runs with or without a local LLM configured (deterministic
+  fallback at every stage). The `poneglyph mcp` daemon's own scheduler
+  (`[consolidation] interval_hours`) does the same thing on a timer — the
+  hook trigger just means you don't need the daemon running for the deeper
+  tiers to form.
 
 Read-only tools (Read, Glob, Grep, TodoWrite, WebSearch, WebFetch) are
 skipped to reduce noise.
@@ -74,8 +82,9 @@ skipped to reduce noise.
 - Network calls run in background (`&`) so they don't block the agent.
 - Content truncated to 4000 chars.
 - Tool output truncated to 2000 chars within the content.
-- The code-graph self-heal trigger (`posttooluse.sh`) and session-summary
-  *generation* (`stop.sh`) stay CLI calls — no REST endpoint for those yet.
+- The code-graph self-heal trigger (`posttooluse.sh`) and the consolidation
+  pipeline trigger (`stop.sh`) stay CLI calls, each with its own debounce
+  marker — no REST endpoint for those yet.
 
 ## Verify
 

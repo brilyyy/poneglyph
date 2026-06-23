@@ -68,6 +68,10 @@ pub struct MemoryDetail {
     #[serde(flatten)]
     pub memory: Memory,
     pub edges: Vec<Edge>,
+    /// For a decoy: the memories it was consolidated from.
+    pub children: Vec<Memory>,
+    /// For a consolidated child: the decoy it was folded into, if any.
+    pub parent: Option<Memory>,
 }
 
 pub async fn get_memory(
@@ -79,7 +83,9 @@ pub async fn get_memory(
         .get_memory(&id)?
         .ok_or_else(|| ApiError::not_found(format!("memory not found: {id}")))?;
     let edges = store.get_edges_for_memory(&id)?;
-    Ok(Json(MemoryDetail { memory, edges }))
+    let children = if memory.is_decoy { store.get_decoy_children(&id)? } else { Vec::new() };
+    let parent = store.get_child_decoy(&id)?;
+    Ok(Json(MemoryDetail { memory, edges, children, parent }))
 }
 
 #[derive(Deserialize)]
@@ -187,6 +193,7 @@ pub async fn search(
         &q.q,
         &filters,
         limit,
+        &state.config.retrieval,
     )?;
 
     let hits: Vec<SearchHit> = results
@@ -562,12 +569,16 @@ pub async fn stats(State(state): State<AppState>) -> ApiResult<Value> {
     let s = store.stats()?;
     let by_type: serde_json::Map<String, Value> =
         s.by_type.into_iter().map(|(t, n)| (t, json!(n))).collect();
+    let by_tier: serde_json::Map<String, Value> =
+        s.by_tier.into_iter().map(|(t, n)| (t, json!(n))).collect();
     Ok(Json(json!({
         "memory_count": s.memory_count,
         "edge_count": s.edge_count,
         "project_count": s.project_count,
         "pending_jobs": s.pending_jobs,
         "by_type": by_type,
+        "by_tier": by_tier,
+        "last_consolidation_at": s.last_consolidation_at,
     })))
 }
 

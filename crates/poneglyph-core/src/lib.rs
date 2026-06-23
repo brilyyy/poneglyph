@@ -10,6 +10,7 @@ pub mod project;
 pub mod llm;
 pub mod cold;
 pub mod consolidate;
+pub mod pipeline;
 pub mod privacy;
 pub mod compress;
 pub mod error;

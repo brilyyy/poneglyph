@@ -149,6 +149,10 @@ impl Default for LayerRetention {
 /// memories). Distinct from the code knowledge graph in [`CodeGraphConfig`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEdgesConfig {
+    /// Master switch for graph extraction: deterministic edge builders
+    /// (similarity/temporal/tag-overlap) and LLM entity/relation extraction.
+    /// When false, neither runs — no edges, no graph clutter.
+    pub enabled: bool,
     pub similarity_threshold: f64,
     pub temporal_window_secs: i64,
 }
@@ -156,6 +160,7 @@ pub struct MemoryEdgesConfig {
 impl Default for MemoryEdgesConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             similarity_threshold: 0.82,
             temporal_window_secs: 300,
         }
@@ -390,6 +395,36 @@ pub struct EnrichmentConfig {
     pub enabled: bool,
 }
 
+/// Tunable weights for the hybrid RRF fusion in `retrieve::recall`. Defaults
+/// mirror what AgentMemory documents (vector 0.6 / bm25 0.4 / graph 0.3) as a
+/// starting point — re-tune against `poneglyph eval` once a baseline exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalConfig {
+    pub dense_weight: f64,
+    pub sparse_weight: f64,
+    pub graph_weight: f64,
+    /// How many extra candidates beyond `limit` to keep in the scoring pool
+    /// before importance/recency/strength get a chance to reorder them.
+    pub overfetch_factor: usize,
+    /// How many hops `graph_expand` walks from the dense/sparse seed set.
+    /// Each additional hop is down-weighted by `GRAPH_HOP_DECAY^hop`, so
+    /// going further mainly helps conceptual multi-hop queries without
+    /// drowning out direct matches.
+    pub graph_hops: usize,
+}
+
+impl Default for RetrievalConfig {
+    fn default() -> Self {
+        Self {
+            dense_weight: 0.6,
+            sparse_weight: 0.4,
+            graph_weight: 0.3,
+            overfetch_factor: 5,
+            graph_hops: 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecayConfig {
     pub enabled: bool,
@@ -481,6 +516,8 @@ pub struct Config {
     pub consolidation: ConsolidationConfig,
     #[serde(default)]
     pub cold_storage: ColdStorageConfig,
+    #[serde(default)]
+    pub retrieval: RetrievalConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +789,7 @@ impl Config {
             decay: DecayConfig::default(),
             consolidation: ConsolidationConfig::default(),
             cold_storage: ColdStorageConfig::default(),
+            retrieval: RetrievalConfig::default(),
         }
     }
 

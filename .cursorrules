@@ -40,14 +40,17 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 <!-- poneglyph:start -->
 ## poneglyph: durable memory + code graph
 
-This project has poneglyph wired up (MCP server `poneglyph serve`). Prefer
-its tools over re-deriving things or grepping for structural code questions:
+This project has poneglyph wired up (MCP server `poneglyph mcp`). Prefer
+its tools over re-deriving things or manually scanning directories:
 
 - `remember` / `recall` / `get_project_context` — durable cross-session
   memory. Call `get_project_context` at session start, `recall` before
   re-researching something, `remember` for durable facts/decisions/preferences.
 - `codegraph_query` (`callers_of:`/`callees_of:`/`imports_of:`/`tests_for:`/
-  `path:<a>..<b>`) and `codegraph_blast_radius` — call/import/test graph.
-  Use instead of grep for "what calls/imports/breaks if I change X".
+  `path:<a>..<b>`, or a bare keyword for a graph-backed name search) and
+  `codegraph_blast_radius` — call/import/test graph. ALWAYS try this FIRST
+  for "find X" / "what calls/imports/breaks if I change X" questions — it's
+  a targeted index lookup, not a directory walk, so it stays fast as the
+  codebase grows. Fall back to grep/glob only when the graph has nothing.
   Requires `poneglyph graph init` to have been run once.
 <!-- poneglyph:end -->

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::path::Path;
 use std::str::FromStr;
@@ -565,10 +565,14 @@ impl Store {
     // Decoy / Schema operations
     // -----------------------------------------------------------------------
 
-    /// Create a schema decoy memory (is_decoy=1, tier=hot).
+    /// Create a schema decoy memory (is_decoy=1, tier=hot). `memory_type` lets
+    /// callers place a decoy at whichever tier it represents — e.g. a
+    /// `Semantic` fact distilled from a cluster of episodic memories, or a
+    /// `Procedural` workflow distilled from a cluster of tool-use memories.
     pub fn create_decoy(
         &self,
         content: &str,
+        memory_type: MemoryType,
         importance: f64,
         project_id: Option<&str>,
         metadata: Option<&serde_json::Value>,
@@ -579,14 +583,14 @@ impl Store {
 
         self.conn.execute(
             "INSERT INTO memories (id, content, memory_type, importance, project_id, source, metadata, created_at, updated_at, access_count, is_decoy, tier, strength, cold_path)
-             VALUES (?1, ?2, 'semantic', ?3, ?4, 'passive', ?5, ?6, ?7, 0, 1, 'hot', 1.0, NULL)",
-            params![id, content, importance, project_id, meta_str, now, now],
+             VALUES (?1, ?2, ?3, ?4, ?5, 'passive', ?6, ?7, ?8, 0, 1, 'hot', 1.0, NULL)",
+            params![id, content, memory_type.to_string(), importance, project_id, meta_str, now, now],
         )?;
 
         Ok(Memory {
             id,
             content: content.to_string(),
-            memory_type: MemoryType::Semantic,
+            memory_type,
             importance,
             project_id: project_id.map(String::from),
             source: Source::Passive,
@@ -1225,7 +1229,39 @@ impl Store {
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
 
-        Ok(Stats { memory_count, edge_count, project_count, pending_jobs: job_count, by_type })
+        let mut stmt = self.conn.prepare("SELECT tier, COUNT(*) FROM memories GROUP BY tier")?;
+        let by_tier: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let last_consolidation_at: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'last_consolidation_at'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        Ok(Stats {
+            memory_count,
+            edge_count,
+            project_count,
+            pending_jobs: job_count,
+            by_type,
+            by_tier,
+            last_consolidation_at,
+        })
+    }
+
+    /// Records that the consolidation pipeline just completed a run, for the
+    /// viewer's pipeline status panel.
+    pub fn mark_consolidation_run(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('last_consolidation_at', ?1)",
+            rusqlite::params![chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
     }
 }
 
@@ -1462,6 +1498,10 @@ pub struct Stats {
     pub pending_jobs: i64,
     /// (memory_type, count) pairs for the dashboard breakdown.
     pub by_type: Vec<(String, i64)>,
+    /// (tier, count) pairs for the pipeline status panel.
+    pub by_tier: Vec<(String, i64)>,
+    /// RFC3339 timestamp of the last completed consolidation pipeline run.
+    pub last_consolidation_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

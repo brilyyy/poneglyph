@@ -207,6 +207,33 @@ async fn memory_detail_includes_edges() {
 }
 
 #[tokio::test]
+async fn memory_detail_resolves_consolidation_lineage() {
+    let (state, store) = open_state();
+    let (decoy_id, child_id) = {
+        let store = store.lock().unwrap();
+        let child = store.create_memory("raw fact", MemoryType::Episodic, 0.5, Source::Cli, None, None).unwrap();
+        let decoy = store
+            .create_decoy("consolidated fact", MemoryType::Semantic, 0.7, None, None)
+            .unwrap();
+        store.link_decoy_child(&decoy.id, &child.id).unwrap();
+        (decoy.id, child.id)
+    };
+    let router = build_router(state);
+
+    let (status, body) = send(router.clone(), get(&format!("/api/memories/{decoy_id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    let children = body["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0]["id"], child_id.as_str());
+    assert!(body["parent"].is_null());
+
+    let (status, body) = send(router, get(&format!("/api/memories/{child_id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["children"].as_array().unwrap().is_empty());
+    assert_eq!(body["parent"]["id"], decoy_id.as_str());
+}
+
+#[tokio::test]
 async fn memory_patch_and_delete() {
     let (state, store) = open_state();
     let mem = {

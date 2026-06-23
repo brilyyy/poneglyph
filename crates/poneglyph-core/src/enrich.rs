@@ -12,13 +12,15 @@
 //! marked `failed`. Individual job failures never take down the worker.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::config::{CompressionMode, EnrichmentConfig, LlmConfig, MemoryEdgesConfig};
+use crate::config::{CompressionMode, Config, EnrichmentConfig, LlmConfig, MemoryEdgesConfig};
+use crate::embed::Embedder;
 use crate::graph;
 use crate::model::{Job, JobStatus, JobType};
 use crate::store::Store;
@@ -45,6 +47,21 @@ pub struct WorkerConfig {
     /// even when enrichment itself is off.
     pub compression_enabled: bool,
     pub compression_mode: CompressionMode,
+    /// Consolidation scheduler: runs the raw→episodic→semantic→procedural
+    /// pipeline + decay across all projects every `interval_hours`. `None`
+    /// disables the scheduler tick entirely.
+    pub consolidation: Option<ConsolidationScheduler>,
+}
+
+/// `pipeline::run_pipeline_for_all_projects` and `consolidate::run_decay`
+/// both take the full `Config` (they read `decay`, `consolidation`,
+/// `embedding`, `llm`...), unlike the flattened fields above which only
+/// cover job draining — so the scheduler carries its own full config copy
+/// rather than re-flattening everything those two functions touch.
+#[derive(Clone)]
+pub struct ConsolidationScheduler {
+    pub config: Config,
+    pub embedder: Option<Arc<Embedder>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +150,11 @@ pub fn process_pending_jobs(store: &Store, edges_cfg: &MemoryEdgesConfig) -> Res
             continue;
         }
         store.mark_job_running(&job.id)?;
+        if !edges_cfg.enabled {
+            store.update_job_status(&job.id, JobStatus::Done, None)?;
+            processed += 1;
+            continue;
+        }
         match graph::build_edges_for_memory(store, edges_cfg, &job.memory_id) {
             Ok(n) => {
                 debug!(memory_id = %job.memory_id, edges = n, "computed edges");
@@ -172,11 +194,14 @@ pub async fn process_jobs_async(
         store.mark_job_running(&job.id)?;
 
         let outcome: Result<()> = match job.job_type {
+            JobType::ComputeEdges if !cfg.edges.enabled => Ok(()),
             JobType::ComputeEdges => {
                 graph::build_edges_for_memory(&*store, &cfg.edges, &job.memory_id).map(|n| {
                     debug!(memory_id = %job.memory_id, edges = n, "computed edges");
                 })
             }
+            // Entities/relations only feed the graph — no graph, no point.
+            JobType::ExtractEntities | JobType::ExtractRelations if !cfg.edges.enabled => Ok(()),
             // Compression degrades gracefully instead of failing: no LLM
             // configured just means the caveman fallback runs in its place.
             JobType::ExtractCompress => match llm {
@@ -268,10 +293,38 @@ pub fn spawn_worker(
             None
         };
 
+        // ponytail: coarse interval timer, not cron — fine for a single
+        // resident worker; upgrade if multi-instance scheduling matters.
+        let mut last_consolidation = tokio::time::Instant::now();
+
         info!("enrichment worker started");
         loop {
             if let Err(e) = process_jobs_async(&mut store, &cfg, llm.as_ref()).await {
                 warn!(error = %e, "drain pass failed");
+            }
+
+            if let Some(scheduler) = &cfg.consolidation {
+                let interval = std::time::Duration::from_secs(scheduler.config.consolidation.interval_hours.max(1) * 3600);
+                if scheduler.config.consolidation.enabled && last_consolidation.elapsed() >= interval {
+                    last_consolidation = tokio::time::Instant::now();
+                    match crate::pipeline::run_pipeline_for_all_projects(
+                        &mut store,
+                        &scheduler.config,
+                        scheduler.embedder.as_deref(),
+                        llm.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(report) => info!(?report, "scheduled consolidation pipeline complete"),
+                        Err(e) => warn!(error = %e, "scheduled consolidation pipeline failed"),
+                    }
+                    if let Err(e) = crate::consolidate::run_decay(&store, &scheduler.config) {
+                        warn!(error = %e, "scheduled decay run failed");
+                    }
+                    if let Err(e) = store.mark_consolidation_run() {
+                        warn!(error = %e, "failed to record consolidation run timestamp");
+                    }
+                }
             }
 
             // Sleep until a notify, the poll interval, or channel close.
@@ -306,6 +359,7 @@ mod tests {
             enrichment: EnrichmentConfig::default(),
             compression_enabled: false,
             compression_mode: CompressionMode::default(),
+            consolidation: None,
         }
     }
 
@@ -338,6 +392,26 @@ mod tests {
         process_pending_jobs(&store, &cfg).unwrap();
         assert_eq!(store.get_edges_for_memory(&m1.id).unwrap().len(), 1);
         let _ = m2;
+    }
+
+    #[test]
+    fn process_pending_jobs_noops_compute_edges_when_disabled() {
+        let store = Store::open_in_memory().unwrap();
+        let cfg = MemoryEdgesConfig { enabled: false, ..MemoryEdgesConfig::default() };
+        let p = store.upsert_project("/p", "p", None).unwrap();
+
+        let m1 = store
+            .create_memory("first", MemoryType::Fact, 0.5, Source::Cli, Some(&p.id), None)
+            .unwrap();
+        let m2 = store
+            .create_memory("second", MemoryType::Fact, 0.5, Source::Cli, Some(&p.id), None)
+            .unwrap();
+
+        enqueue_compute_edges(&store, &m2.id).unwrap();
+        let processed = process_pending_jobs(&store, &cfg).unwrap();
+        assert_eq!(processed, 1, "job is drained (marked Done), just skipped");
+        assert_eq!(store.stats().unwrap().pending_jobs, 0);
+        assert_eq!(store.get_edges_for_memory(&m1.id).unwrap().len(), 0, "no edges built while disabled");
     }
 
     #[test]

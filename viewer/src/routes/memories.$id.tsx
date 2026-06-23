@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 
 import { api, formatDate, formatRelative } from '#/lib/api.ts'
 import { TypeBadge } from '#/components/type-badge.tsx'
+import { StrengthIndicator, TierBadge } from '#/components/timeline-indicators.tsx'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -148,6 +149,11 @@ function MemoryDetailPage() {
             <dl className="space-y-2 text-sm">
               <Row k="id" v={<code className="text-xs">{m.id}</code>} />
               <Row k="importance" v={m.importance.toFixed(2)} />
+              <Row k="tier" v={<TierBadge tier={m.tier} />} />
+              <Row k="strength" v={<StrengthIndicator strength={m.strength} />} />
+              {typeof m.metadata?.confidence === 'number' && (
+                <Row k="confidence" v={(m.metadata.confidence as number).toFixed(2)} />
+              )}
               <Row k="created" v={formatDate(m.created_at)} />
               <Row k="updated" v={formatRelative(m.updated_at)} />
               <Row k="accessed" v={`${formatRelative(m.accessed_at)} (${m.access_count}×)`} />
@@ -170,6 +176,30 @@ function MemoryDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {(m.children.length > 0 || m.parent) && (
+        <Card className="gap-0 pb-0">
+          <CardHeader className="pb-4">
+            <CardTitle>
+              {m.is_decoy ? `Consolidated from (${m.children.length})` : 'Consolidated into'}
+            </CardTitle>
+          </CardHeader>
+          <ul className="divide-y divide-border">
+            {(m.is_decoy ? m.children : m.parent ? [m.parent] : []).map((other) => (
+              <li key={other.id} className="flex items-center gap-3 px-6 py-2 text-sm">
+                <TypeBadge type={other.memory_type} />
+                <Link
+                  to="/memories/$id"
+                  params={{ id: other.id }}
+                  className="truncate text-xs text-primary hover:underline"
+                >
+                  {other.content}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       <Card className="gap-0 pb-0">
         <CardHeader className="pb-4">

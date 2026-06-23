@@ -160,7 +160,7 @@ if [[ -z "$BINARY" ]]; then
 
   # ── build ───────────────────────────────────────────────────────────────
   if [[ "$SKIP_BUILD" == false ]]; then
-    BUILD_FEATURES="viewer"
+    BUILD_FEATURES="viewer,reranker"
     if [[ "$YES" == false ]]; then
       hdr "Choose an LLM provider to compile in"
       echo "Powers background enrichment/compression. Each provider adds its own"

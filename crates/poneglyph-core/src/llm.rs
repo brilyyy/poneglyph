@@ -406,7 +406,7 @@ async fn complete_gemini(
 }
 
 /// Parse a JSON reply, tolerating the ``` fences local models love.
-fn parse_json_reply<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
+pub(crate) fn parse_json_reply<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
     let trimmed = raw.trim();
     let inner = trimmed
         .strip_prefix("```json")
@@ -512,6 +512,9 @@ async fn extract_compress(store: &mut Store, client: &LlmClient, m: &crate::mode
 }
 
 async fn extract_entities(store: &mut Store, client: &LlmClient, m: &crate::model::Memory) -> Result<()> {
+    if m.memory_type == crate::model::MemoryType::CodeContext {
+        return Ok(()); // graph clutter — code_context never feeds the graph
+    }
     let raw = client
         .complete(
             "Extract named entities from the text: technologies, libraries, people, projects, \
@@ -541,6 +544,9 @@ struct RelationReply {
 }
 
 async fn extract_relations(store: &mut Store, client: &LlmClient, m: &crate::model::Memory) -> Result<()> {
+    if m.memory_type == crate::model::MemoryType::CodeContext {
+        return Ok(()); // graph clutter — code_context never feeds the graph
+    }
     // Grounded design: candidates are real nearest-neighbour memories; the
     // LLM only labels which are related and how. No dangling entity nodes.
     let candidates = graph::nearest_neighbors(store, &m.id, RELATION_CANDIDATES)?;

@@ -43,12 +43,21 @@ if [ -n "$MSG" ]; then
   ) &
 fi
 
-# Generate a session summary (extractive, or LLM-backed when configured).
-# ponytail: /api/session-summary is read-only (latest existing summary) —
-# generation still goes through the CLI; add a POST endpoint if this needs
-# to drop the CLI dependency too.
-command -v poneglyph >/dev/null 2>&1 && poneglyph session-summary \
-  ${CWD:+--project "$CWD"} \
-  >/dev/null 2>&1 &
+# Run the consolidation pipeline (raw → episodic session summary → semantic
+# facts → procedural workflows), debounced so a flurry of Stop events in one
+# session doesn't restart it every time. ponytail: coarse mtime-marker
+# debounce (~30 min), not a queue — the `poneglyph mcp` daemon's own
+# scheduler (`[consolidation] interval_hours`) is still the guaranteed-fresh
+# path; this is the no-daemon fallback so semantic/procedural tiers still
+# form for hook-only (no daemon) setups.
+HASH=$(printf '%s' "${CWD:-global}" | (md5 -q 2>/dev/null || md5sum 2>/dev/null | cut -d' ' -f1))
+MARKER="${TMPDIR:-/tmp}/poneglyph-consolidate-debounce-${HASH}"
+LAST=$(stat -f %m "$MARKER" 2>/dev/null || stat -c %Y "$MARKER" 2>/dev/null || echo 0)
+if [ $(($(date +%s) - LAST)) -ge 1800 ]; then
+  touch "$MARKER" 2>/dev/null
+  command -v poneglyph >/dev/null 2>&1 && poneglyph consolidate \
+    ${CWD:+--project "$CWD"} \
+    >/dev/null 2>&1 &
+fi
 
 exit 0  # always succeed — never block Claude Code

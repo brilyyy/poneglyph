@@ -55,10 +55,16 @@ export interface Stats {
   project_count: number
   pending_jobs: number
   by_type: Partial<Record<MemoryType, number>>
+  by_tier: Partial<Record<Memory['tier'], number>>
+  last_consolidation_at: string | null
 }
 
 export interface MemoryDetail extends Memory {
   edges: Edge[]
+  /** For a decoy: the memories it was consolidated from. */
+  children: Memory[]
+  /** For a consolidated child: the decoy it was folded into, if any. */
+  parent: Memory | null
 }
 
 export interface SearchHit extends Memory {
@@ -102,6 +108,13 @@ export const TYPE_COLORS: Record<MemoryType, string> = {
   fact: '#a78bfa', // violet-400
   preference: '#f472b6', // pink-400
   code_context: '#94a3b8', // slate-400
+}
+
+/** Node color per tier, for the graph view's color-by-tier toggle. */
+export const TIER_COLORS: Record<Memory['tier'], string> = {
+  hot: '#f87171', // red-400
+  warm: '#fb923c', // orange-400
+  cold: '#38bdf8', // sky-400
 }
 
 export interface TimelineSession {

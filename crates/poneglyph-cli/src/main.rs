@@ -1,6 +1,7 @@
 mod daemon;
 mod demo;
 mod detect;
+mod eval;
 mod graph_registry;
 
 use anyhow::{Context, Result};
@@ -19,11 +20,15 @@ use poneglyph_core::store::Store;
 /// Printed only on `init` — `mcp`'s stdout is reserved for MCP JSON-RPC.
 const BANNER: &str = include_str!("banner.txt");
 
+/// Full-color logo for the no-subcommand default view.
+const LOGO: &str = include_str!("logo.ans");
+
 #[derive(Parser)]
 #[command(name = "poneglyph", version, about = "Local AI memory engine")]
 struct Cli {
+    /// No subcommand: starts MCP + viewer together (see `cmd_default`).
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
     /// Path to an explicit config file to load instead of the default search
     #[arg(long = "config-file", global = true)]
     config_file: Option<PathBuf>,
@@ -109,6 +114,18 @@ enum Command {
     },
     /// Run decay: update strengths and archive low-strength memories
     Decay,
+    /// Evaluate retrieval against a LongMemEval-style dataset (R@1/R@5/R@10/MRR)
+    Eval {
+        /// Path to a LongMemEval JSON file (top-level array of instances)
+        #[arg(long)]
+        dataset: PathBuf,
+        /// Only evaluate the first N instances (omit for the full dataset)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Print the summary as JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
     /// Show status
     Status,
     /// Code knowledge graph (Tree-sitter) — distinct from the memory graph
@@ -228,7 +245,10 @@ async fn main() {
     }
 }
 
-async fn run(command: Command, config: &Config) -> Result<()> {
+async fn run(command: Option<Command>, config: &Config) -> Result<()> {
+    let Some(command) = command else {
+        return cmd_default(config).await;
+    };
     match command {
         Command::Init { config: write_global_config } => cmd_init(&config, write_global_config),
         Command::Daemon { action } => cmd_daemon(&config, action),
@@ -262,6 +282,7 @@ async fn run(command: Command, config: &Config) -> Result<()> {
         } => cmd_context(&config, &project, max_tokens).await,
         Command::Consolidate { project } => cmd_consolidate(&config, project.as_deref()).await,
         Command::Decay => cmd_decay(&config),
+        Command::Eval { dataset, limit, json } => cmd_eval(&config, &dataset, limit, json).await,
         Command::Status => cmd_status(&config),
         Command::Graph { action } => cmd_graph(&config, action),
         Command::Wire { ide } => cmd_wire(&config, &ide),
@@ -409,7 +430,7 @@ fn cmd_wire(config: &Config, ide: &str) -> Result<()> {
 
 /// Load the embedding model, degrading to FTS-only operation on failure
 /// (e.g. first run while offline).
-async fn try_embedder(config: &Config) -> Option<Arc<Embedder>> {
+pub(crate) async fn try_embedder(config: &Config) -> Option<Arc<Embedder>> {
     match Embedder::new(config).await {
         Ok(e) => Some(Arc::new(e)),
         Err(e) => {
@@ -419,18 +440,18 @@ async fn try_embedder(config: &Config) -> Option<Arc<Embedder>> {
     }
 }
 
-/// Open the store + embedder and spawn the background enrich worker — the
-/// setup shared by `mcp` (MCP) and `viewer` (HTTP), each otherwise
-/// running standalone in its own process.
-async fn open_store_and_worker(
-    config: &Config,
-) -> Result<(
+type ServerBootstrap = (
     Arc<Mutex<Store>>,
     Option<Arc<Embedder>>,
     Arc<Config>,
     poneglyph_core::enrich::EnrichHandle,
     tokio::task::JoinHandle<()>,
-)> {
+);
+
+/// Open the store + embedder and spawn the background enrich worker — the
+/// setup shared by `mcp` (MCP) and `viewer` (HTTP), each otherwise
+/// running standalone in its own process.
+async fn open_store_and_worker(config: &Config) -> Result<ServerBootstrap> {
     config.ensure_dirs()?;
     let store = Store::open(&config.db_path).context("failed to open database")?;
     let store = Arc::new(Mutex::new(store));
@@ -447,10 +468,102 @@ async fn open_store_and_worker(
             enrichment: config.enrichment.clone(),
             compression_enabled: config.memory.compression_enabled,
             compression_mode: config.memory.compression_mode,
+            consolidation: Some(poneglyph_core::enrich::ConsolidationScheduler {
+                config: config.clone(),
+                embedder: embedder.clone(),
+            }),
         },
     );
 
     Ok((store, embedder, shared_config, enrich, worker))
+}
+
+/// No subcommand: print the logo, bring up MCP + viewer together in one
+/// process (sharing the one `open_store_and_worker` setup instead of running
+/// two separate `poneglyph mcp` / `poneglyph viewer` processes), and print a
+/// one-line status once both ports are bound.
+#[cfg(feature = "viewer")]
+async fn cmd_default(config: &Config) -> Result<()> {
+    poneglyph_http::validate_security(config)?;
+    println!("{LOGO}");
+
+    let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
+    let graph_update_task = spawn_graph_auto_update(store.clone(), shared_config.clone());
+
+    let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store.clone(), embedder.clone(), shared_config.clone())
+        .with_enrich(enrich.clone());
+    let mcp_state = poneglyph_http::AppState {
+        store: store.clone(),
+        embedder: embedder.clone(),
+        config: shared_config.clone(),
+        enrich: Some(enrich.clone()),
+    };
+    let mcp_app = poneglyph_http::build_router(mcp_state)
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .nest_service("/mcp", poneglyph_mcp::server::streamable_http_service(mcp));
+    let mcp_addr = format!("127.0.0.1:{}", config.agents.mcp_server_port);
+    let mcp_listener = tokio::net::TcpListener::bind(&mcp_addr)
+        .await
+        .with_context(|| format!("failed to bind MCP engine on {mcp_addr}"))?;
+
+    let viewer_state = poneglyph_http::AppState {
+        store,
+        embedder,
+        config: shared_config,
+        enrich: Some(enrich),
+    };
+    let viewer_listener = poneglyph_http::bind(config)
+        .await
+        .context("failed to bind HTTP server")?;
+
+    println!(
+        "mcp active :{}  viewer active :{}",
+        config.agents.mcp_server_port, config.dashboard.port
+    );
+    let result = tokio::select! {
+        r = axum::serve(mcp_listener, mcp_app) => r.context("MCP engine server failed"),
+        r = poneglyph_http::serve_on(viewer_listener, viewer_state) => r,
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    };
+
+    worker.abort();
+    graph_update_task.abort();
+    result
+}
+
+/// No subcommand, `viewer` feature not compiled in: MCP alone.
+#[cfg(not(feature = "viewer"))]
+async fn cmd_default(config: &Config) -> Result<()> {
+    println!("{LOGO}");
+
+    let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
+    let graph_update_task = spawn_graph_auto_update(store.clone(), shared_config.clone());
+
+    let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store.clone(), embedder.clone(), shared_config.clone())
+        .with_enrich(enrich.clone());
+    let http_state = poneglyph_http::AppState {
+        store,
+        embedder,
+        config: shared_config.clone(),
+        enrich: Some(enrich),
+    };
+    let app = poneglyph_http::build_router(http_state)
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .nest_service("/mcp", poneglyph_mcp::server::streamable_http_service(mcp));
+    let addr = format!("127.0.0.1:{}", config.agents.mcp_server_port);
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("failed to bind MCP engine on {addr}"))?;
+
+    println!("mcp active :{}", config.agents.mcp_server_port);
+    let result = tokio::select! {
+        r = axum::serve(listener, app) => r.context("MCP engine server failed"),
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    };
+
+    worker.abort();
+    graph_update_task.abort();
+    result
 }
 
 /// MCP engine. Default: Streamable HTTP on `agents.mcp_server_port` — a
@@ -722,6 +835,7 @@ async fn cmd_recall(config: &Config, query: &str, limit: usize) -> Result<()> {
         query,
         &filters,
         limit,
+        &config.retrieval,
     )?;
 
     if results.is_empty() {
@@ -808,8 +922,9 @@ async fn cmd_context(config: &Config, project: &str, max_tokens: usize) -> Resul
 
 async fn cmd_consolidate(config: &Config, project_path: Option<&str>) -> Result<()> {
     config.ensure_dirs()?;
-    let store = Store::open(&config.db_path)?;
+    let mut store = Store::open(&config.db_path)?;
     let embedder = try_embedder(config).await;
+    let llm = LlmClient::from_config(&config.llm);
 
     // Resolve project
     let project_id = match project_path {
@@ -817,57 +932,32 @@ async fn cmd_consolidate(config: &Config, project_path: Option<&str>) -> Result<
         None => None,
     };
 
-    if let Some(pid) = &project_id {
-        let results = poneglyph_core::consolidate::consolidate_project(
-            &store,
-            pid,
-            config,
-            embedder.as_deref(),
-        )
-        .await?;
-
-        if results.is_empty() {
-            println!("No clusters found to consolidate.");
-        } else {
-            println!("Consolidated {} clusters:", results.len());
-            for r in &results {
-                println!(
-                    "  decoy {} — {} children: {}",
-                    &r.decoy_id[..8],
-                    r.child_count,
-                    truncate(&r.summary, 60)
-                );
-            }
-        }
-    } else {
-        // Consolidate all projects
-        let projects = store.list_projects()?;
-        let mut total_consolidated = 0;
-
-        for project in &projects {
-            let results = poneglyph_core::consolidate::consolidate_project(
-                &store,
-                &project.id,
+    let report = match &project_id {
+        Some(pid) => {
+            poneglyph_core::pipeline::run_pipeline_for_project(
+                &mut store,
+                pid,
                 config,
                 embedder.as_deref(),
+                llm.as_ref(),
             )
-            .await?;
-
-            if !results.is_empty() {
-                println!("Project {}:", project.name);
-                for r in &results {
-                    println!("  decoy {} — {} children", &r.decoy_id[..8], r.child_count);
-                }
-                total_consolidated += results.len();
-            }
+            .await?
         }
-
-        if total_consolidated == 0 {
-            println!("No clusters found to consolidate across any project.");
-        } else {
-            println!("\nTotal: {} clusters consolidated.", total_consolidated);
+        None => {
+            poneglyph_core::pipeline::run_pipeline_for_all_projects(
+                &mut store,
+                config,
+                embedder.as_deref(),
+                llm.as_ref(),
+            )
+            .await?
         }
-    }
+    };
+
+    println!(
+        "Pipeline run complete: {} episodic summaries, {} semantic facts, {} procedures.",
+        report.episodic_summaries, report.semantic_facts, report.procedures
+    );
 
     Ok(())
 }
@@ -882,6 +972,26 @@ fn cmd_decay(config: &Config) -> Result<()> {
     println!("  Strengths updated: {}", report.strengths_updated);
     println!("  Archived to cold:  {}", report.archived);
     println!("  Pruned (very low): {}", report.pruned);
+
+    Ok(())
+}
+
+async fn cmd_eval(config: &Config, dataset: &std::path::Path, limit: Option<usize>, json: bool) -> Result<()> {
+    let summary = eval::run(config, dataset, limit).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    println!("LongMemEval — {}", dataset.display());
+    println!("  instances:        {}", summary.total_instances);
+    println!("  evaluated:        {}", summary.evaluated);
+    println!("  skipped (no gold): {}", summary.skipped_no_gold);
+    println!("  R@1:  {:.3}", summary.recall_at_1);
+    println!("  R@5:  {:.3}", summary.recall_at_5);
+    println!("  R@10: {:.3}", summary.recall_at_10);
+    println!("  MRR:  {:.3}", summary.mrr);
 
     Ok(())
 }
@@ -1069,26 +1179,13 @@ fn update_graph_lock() {
     );
 }
 
-fn extractive_summary(top: &[&poneglyph_core::model::Memory]) -> String {
-    let text = top
-        .iter()
-        .map(|m| m.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n---\n");
-    if text.len() > 2000 {
-        format!("{}...", &text[..2000])
-    } else {
-        text
-    }
-}
-
 async fn cmd_session_summary(
     config: &Config,
     project_path: Option<&str>,
     latest: bool,
 ) -> Result<()> {
     config.ensure_dirs()?;
-    let store = Store::open(&config.db_path)?;
+    let mut store = Store::open(&config.db_path)?;
 
     // Resolve project
     let project_id = match project_path {
@@ -1098,7 +1195,7 @@ async fn cmd_session_summary(
 
     if latest {
         // Show the most recent session-summary memory
-        let (memories, _) = store.list_memories(project_id.as_deref(), Some("semantic"), 50, 0)?;
+        let (memories, _) = store.list_memories(project_id.as_deref(), Some("episodic"), 50, 0)?;
         let summary = memories.iter().find(|m| {
             m.metadata
                 .as_ref()
@@ -1115,77 +1212,15 @@ async fn cmd_session_summary(
         return Ok(());
     }
 
-    // Generate a new extractive summary from recent session memories
-    let (memories, _) = store.list_memories(project_id.as_deref(), None, 30, 0)?;
-
-    // Filter to real memories (not decoys, not session-summary tags)
-    let real: Vec<_> = memories
-        .iter()
-        .filter(|m| {
-            !m.is_decoy
-                && !m
-                    .metadata
-                    .as_ref()
-                    .and_then(|meta| meta.get("tags"))
-                    .and_then(|tags| tags.as_array())
-                    .map(|arr| arr.iter().any(|t| t.as_str() == Some("session-summary")))
-                    .unwrap_or(false)
-        })
-        .collect();
-
-    if real.is_empty() {
-        return Ok(());
-    }
-
-    // Sort by importance, take top 10
-    let mut sorted = real.clone();
-    sorted.sort_by(|a, b| {
-        b.importance
-            .partial_cmp(&a.importance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let top: Vec<_> = sorted.iter().take(10).copied().collect();
-
-    // Try LLM summarization; fall back to extractive join
     let llm = LlmClient::from_config(&config.llm);
-    let summary_text = if let Some(client) = &llm {
-        let memories_text = top
-            .iter()
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n---\n");
-        match client
-            .complete(
-                "You summarize coding sessions for a developer's memory store. \
-             Given a few memories from one session, reply with a concise summary \
-             of what was worked on. Plain text, no preamble, 2-4 sentences.",
-                &memories_text,
-            )
-            .await
-        {
-            Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
-            _ => extractive_summary(&top), // LLM failed, fall back
-        }
-    } else {
-        extractive_summary(&top)
+    let Some(mem) =
+        poneglyph_core::pipeline::summarize_session(&mut store, project_id.as_deref(), llm.as_ref()).await?
+    else {
+        return Ok(());
     };
 
-    // Store as a tagged memory
-    let metadata = serde_json::json!({ "tags": ["session-summary"] });
-    let mem = store.create_memory(
-        &summary_text,
-        MemoryType::Semantic,
-        0.5,
-        Source::Cli,
-        project_id.as_deref(),
-        Some(&metadata),
-    )?;
-    store.index_fts(&mem.id, &summary_text)?;
-
-    // Enqueue edges (non-blocking)
-    let _ = poneglyph_core::enrich::enqueue_compute_edges(&store, &mem.id);
-
-    // Enqueue LLM enrichment if available
+    // Enqueue LLM enrichment if available (edges are already enqueued by
+    // `summarize_session` itself).
     if llm.is_some() {
         let _ = poneglyph_core::enrich::enqueue_llm_jobs(&store, &mem.id);
     }

@@ -68,7 +68,26 @@ Memories move through tiers based on access patterns:
 | Long-term | 180 days | Rarely accessed but valuable |
 | Archival | Forever | Explicitly important memories |
 
-Without access, memories lose ~2% strength per day (Ebbinghaus curve). When strength drops below 0.3, memories become candidates for **consolidation** — merging into cluster summaries that represent many related memories in one.
+Without access, memories lose ~2% strength per day (Ebbinghaus curve). When strength drops below 0.3, memories become candidates for **consolidation**.
+
+### Consolidation pipeline (memory_type promotion)
+
+Separately from the storage tiers above, a pipeline promotes memories through
+`memory_type` stages — `episodic` → `semantic` → `procedural` — runnable with
+or without a local LLM:
+
+| Stage | LLM path | Deterministic fallback (`llm.enabled=false`) |
+|---|---|---|
+| raw → episodic | Abstractive session summary | Extractive top-content join |
+| episodic → semantic | Fact distillation + confidence score | Embedding-cluster decoy + cluster-cohesion confidence |
+| semantic → procedural | Workflow synthesis (trigger/steps/outcome) | Frequent tool-sequence n-gram mining |
+
+Every promoted memory keeps **lineage** back to its sources (so a `semantic`
+decoy links to the `episodic` memories it was distilled from, and so on).
+Runs on two triggers: the `poneglyph mcp` daemon's scheduler
+(`[consolidation] interval_hours`, default 6h) and a debounced call from the
+Claude Code `stop` hook — see [INTEGRATIONS.md](INTEGRATIONS.md). Trigger it
+manually with `poneglyph consolidate [--project <path>]`.
 
 ### Edges (the knowledge graph)
 

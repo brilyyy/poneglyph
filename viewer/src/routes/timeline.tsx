@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 
-import { api, formatRelative, truncate } from '#/lib/api.ts'
+import { api, formatRelative } from '#/lib/api.ts'
 import type { Memory, TimelineSession } from '#/lib/types.ts'
 import { MEMORY_TYPES } from '#/lib/types.ts'
 import { TypeBadge } from '#/components/type-badge.tsx'
@@ -224,6 +224,9 @@ function TimelinePage() {
 // ---------------------------------------------------------------------------
 
 function SessionCard({ session }: { session: TimelineSession }) {
+  const hasSummary = session.memories.some((m) =>
+    ((m.metadata as { tags?: string[] } | null)?.tags ?? []).includes('session-summary'),
+  )
   return (
     <div className="space-y-2 rounded-md border border-border/50 bg-card/50 p-3">
       {/* Session Stats Header */}
@@ -237,11 +240,17 @@ function SessionCard({ session }: { session: TimelineSession }) {
         <TypeCounts counts={session.type_counts} />
         <span className="opacity-50">·</span>
         <SourceCounts counts={session.source_counts} />
+        {hasSummary && (
+          <>
+            <span className="opacity-50">·</span>
+            <span className="text-emerald-500">summarized</span>
+          </>
+        )}
       </div>
 
       {/* Grouped Memories */}
       <div className="space-y-1">
-        {groupMemories(session.memories).map((item, idx) => {
+        {groupMemories(session.memories).map((item) => {
           if ('type' in item && item.type === 'qa') {
             return <QAPair key={item.input.id} input={item.input} output={item.output} />
           }
@@ -266,7 +275,10 @@ function SourceCounts({ counts }: { counts: Partial<Record<string, number>> }) {
   return (
     <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
       {Object.entries(counts).map(([src, count]) => (
-        <SourceBadge key={src} source={src as any} />
+        <span key={src} className="inline-flex items-center gap-0.5">
+          <SourceBadge source={src as any} />
+          {count}
+        </span>
       ))}
     </span>
   )
