@@ -142,7 +142,7 @@ export interface TimelineResponse {
 // ---------------------------------------------------------------------------
 
 export type CgNodeKind = 'function' | 'method' | 'type' | 'import' | 'test'
-export type CgEdgeKind = 'calls' | 'imports' | 'tests'
+export type CgEdgeKind = 'calls' | 'imports' | 'tests' | 'extends'
 
 export interface CgNode {
   id: string
@@ -164,6 +164,33 @@ export interface CodegraphResponse {
   edges: CgEdge[]
   total_nodes: number
   total_edges: number
+  stale: boolean
+}
+
+export interface CgSnippet {
+  node_id: string
+  file_path: string
+  start_line: number
+  end_line: number
+  source: string
+}
+
+export interface CgDependent {
+  node: CgNode
+  depth: number
+}
+
+/** Mirrors `ExploreReport` in poneglyph-core/src/codegraph/explore.rs. */
+export interface CgExploreReport {
+  root: CgNode[]
+  snippets: CgSnippet[]
+  callers: CgNode[]
+  callees: CgNode[]
+  supertypes: CgNode[]
+  subtypes: CgNode[]
+  tests: CgNode[]
+  blast_radius: { root: CgNode[]; dependents: CgDependent[]; tests: CgNode[] }
+  stale: boolean
 }
 
 export interface ProjectContext {

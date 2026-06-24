@@ -6,7 +6,7 @@ mod graph_registry;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::EnvFilter;
 
@@ -36,12 +36,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Initialize this project: database, .poneglyphignore, code-graph lock,
-    /// and inject usage rules into CLAUDE.md/AGENTS.md/.cursorrules if present
+    /// Initialize the global database and inject usage rules into
+    /// CLAUDE.md/AGENTS.md/.cursorrules if present (run `graph init` for
+    /// `.poneglyphignore` / code-graph lock)
     Init {
         /// Also (re)write the global config at ~/.config/poneglyph/config.toml
         #[arg(long)]
         config: bool,
+        /// Also link global agent rules via ~/.claude/CLAUDE.poneglyph.md /
+        /// ~/.config/opencode/AGENTS.poneglyph.md (claude-code, opencode only)
+        #[arg(short = 'g', long)]
+        global_rules: bool,
+        /// Inject rules into this project path instead of the current directory
+        #[arg(short = 'p', long, value_name = "PATH")]
+        project: Option<PathBuf>,
     },
     /// Manage the `poneglyph mcp` daemon as a login service (launchd/systemd)
     Daemon {
@@ -60,6 +68,58 @@ enum Command {
     /// Start the web dashboard + graph viewer (HTTP) — for browsing in person
     #[cfg(feature = "viewer")]
     Viewer,
+    /// Store, search, and manage memories
+    Memory {
+        #[command(subcommand)]
+        action: MemoryCommand,
+    },
+    /// Seed sample data into a database (no server; run `poneglyph viewer` to view)
+    Demo {
+        /// Number of memories to seed
+        #[arg(long, default_value = "60")]
+        count: usize,
+        /// Seed into this DB instead of the configured database
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Seed even if the target database already has memories
+        #[arg(long)]
+        force: bool,
+    },
+    /// Evaluate retrieval against a LongMemEval-style dataset (R@1/R@5/R@10/MRR)
+    Eval {
+        /// Path to a LongMemEval JSON file (top-level array of instances)
+        #[arg(long)]
+        dataset: PathBuf,
+        /// Only evaluate the first N instances (omit for the full dataset)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Print the summary as JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show status
+    Status,
+    /// Remove dead project registrations (graph_projects.toml entries and
+    /// `projects` rows whose directory no longer exists on disk)
+    Cleanup,
+    /// Code knowledge graph (Tree-sitter) — distinct from the memory graph
+    Graph {
+        #[command(subcommand)]
+        action: GraphCommand,
+    },
+    /// Wire up an agent with poneglyph: MCP server registration, hook
+    /// scripts, and/or the skill file
+    Wire {
+        target: detect::WireTarget,
+        /// Agent to wire: claude-code, opencode, cursor, gemini, codex,
+        /// copilot, or '*' for every agent compiled into this binary
+        #[arg(long)]
+        agent: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryCommand {
     /// Store a memory
     Remember {
         content: String,
@@ -94,18 +154,6 @@ enum Command {
         #[arg(long, default_value = "600")]
         max_tokens: usize,
     },
-    /// Seed sample data into a database (no server; run `poneglyph viewer` to view)
-    Demo {
-        /// Number of memories to seed
-        #[arg(long, default_value = "60")]
-        count: usize,
-        /// Seed into this DB instead of the configured database
-        #[arg(long)]
-        db: Option<PathBuf>,
-        /// Seed even if the target database already has memories
-        #[arg(long)]
-        force: bool,
-    },
     /// Consolidate similar memories into schema decoys
     Consolidate {
         /// Project path to consolidate (all projects if omitted)
@@ -114,30 +162,6 @@ enum Command {
     },
     /// Run decay: update strengths and archive low-strength memories
     Decay,
-    /// Evaluate retrieval against a LongMemEval-style dataset (R@1/R@5/R@10/MRR)
-    Eval {
-        /// Path to a LongMemEval JSON file (top-level array of instances)
-        #[arg(long)]
-        dataset: PathBuf,
-        /// Only evaluate the first N instances (omit for the full dataset)
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Print the summary as JSON instead of a table
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show status
-    Status,
-    /// Code knowledge graph (Tree-sitter) — distinct from the memory graph
-    Graph {
-        #[command(subcommand)]
-        action: GraphCommand,
-    },
-    /// Wire up an IDE/agent with poneglyph (MCP server, hooks, plugin, skill)
-    Wire {
-        /// IDE to wire: claude-code, opencode, cursor, gemini, codex, copilot
-        ide: String,
-    },
     /// Generate or display session summaries (for hooks)
     SessionSummary {
         /// Project path to scope the summary to
@@ -180,13 +204,19 @@ enum GraphCommand {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Structured (callers_of:/callees_of:/imports_of:/tests_for:/path:<a>..<b>) or keyword query
-    Query { q: String },
+    /// Structured (callers_of:/callees_of:/imports_of:/tests_for:/subtypes_of:/supertypes_of:/path:<a>..<b>) or keyword query
+    Query {
+        q: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
     /// Recursive caller/importer/test trace from a file or symbol
     BlastRadius {
         target: String,
         #[arg(long)]
         depth: Option<usize>,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
     },
     /// Export the graph as json, dot, or graphml
     Export {
@@ -194,6 +224,17 @@ enum GraphCommand {
         format: String,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Everything about a symbol in one call: source snippet, callers/callees,
+    /// supertypes/subtypes, covering tests, and bounded blast radius
+    Explore {
+        target: String,
+        #[arg(long)]
+        depth: Option<usize>,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
     },
 }
 
@@ -250,52 +291,34 @@ async fn run(command: Option<Command>, config: &Config) -> Result<()> {
         return cmd_default(config).await;
     };
     match command {
-        Command::Init { config: write_global_config } => cmd_init(&config, write_global_config),
+        Command::Init { config: write_global_config, global_rules, project } => {
+            cmd_init(&config, write_global_config, global_rules, project.as_deref())
+        }
         Command::Daemon { action } => cmd_daemon(&config, action),
         Command::Mcp { stdio } => cmd_mcp(&config, stdio).await,
         #[cfg(feature = "viewer")]
         Command::Viewer => cmd_viewer(&config).await,
-        Command::Remember {
-            content,
-            r#type,
-            importance,
-            project,
-            tag,
-        } => {
-            cmd_remember(
-                &config,
-                &content,
-                &r#type,
-                importance,
-                project.as_deref(),
-                &tag,
-            )
-            .await
-        }
-        Command::Recall { query, limit } => cmd_recall(&config, &query, limit).await,
-        Command::Forget { id } => cmd_forget(&config, &id),
+        Command::Memory { action } => cmd_memory(&config, action).await,
         Command::Demo { count, db, force } => cmd_demo(&config, count, db, force).await,
-        Command::Export { format } => cmd_export(&config, &format),
-        Command::Context {
-            project,
-            max_tokens,
-        } => cmd_context(&config, &project, max_tokens).await,
-        Command::Consolidate { project } => cmd_consolidate(&config, project.as_deref()).await,
-        Command::Decay => cmd_decay(&config),
         Command::Eval { dataset, limit, json } => cmd_eval(&config, &dataset, limit, json).await,
-        Command::Status => cmd_status(&config),
+        Command::Status => cmd_status(&config).await,
+        Command::Cleanup => cmd_cleanup(&config),
         Command::Graph { action } => cmd_graph(&config, action),
-        Command::Wire { ide } => cmd_wire(&config, &ide),
-        Command::SessionSummary { project, latest } => {
-            cmd_session_summary(&config, project.as_deref(), latest).await
-        }
+        Command::Wire { target, agent } => cmd_wire(&config, target, &agent),
     }
 }
 
-/// Project init: DB, .poneglyphignore, code-graph lock, and rule injection.
-/// `--config` additionally (re)writes the global config — most users only
-/// need that once, on install, not per-project.
-fn cmd_init(config: &Config, write_global_config: bool) -> Result<()> {
+/// Global DB init + rule injection. `--config` additionally (re)writes the
+/// global config; `-g` links global agent rules via a sibling
+/// `{CLAUDE/AGENTS}.poneglyph.md` file; `-p` targets another project path
+/// instead of the current directory. `.poneglyphignore` / code-graph lock
+/// creation lives in `graph init` now, not here.
+fn cmd_init(
+    config: &Config,
+    write_global_config: bool,
+    global_rules: bool,
+    project: Option<&Path>,
+) -> Result<()> {
     println!("\x1b[38;2;153;0;17m{BANNER}\x1b[0m");
 
     if write_global_config {
@@ -310,36 +333,13 @@ fn cmd_init(config: &Config, write_global_config: bool) -> Result<()> {
     Store::open(&config.db_path).context("failed to initialize database")?;
     println!("Database initialized: {}", config.db_path.display());
 
-    // Create project-local .poneglyphignore (skip if exists).
-    let ignore_path = std::path::Path::new(".poneglyphignore");
-    if !ignore_path.exists() {
-        std::fs::write(
-            ignore_path,
-            "node_modules/\ntarget/\nvendor/\n.git/\ndist/\nbuild/\nout/\n.DS_Store\n",
-        )?;
-        println!("Created: .poneglyphignore");
-    }
-
-    // Create .poneglyph/code-graph-lock.json (skip if exists).
-    let lock_dir = std::path::Path::new(".poneglyph");
-    let lock_path = lock_dir.join("code-graph-lock.json");
-    if !lock_path.exists() {
-        std::fs::create_dir_all(lock_dir).context("failed to create .poneglyph directory")?;
-        let lock = serde_json::json!({
-            "version": 1,
-            "created_at": chrono::Utc::now().to_rfc3339(),
-            "last_build": null,
-            "languages": ["rust", "typescript", "javascript", "python", "go"]
-        });
-        std::fs::write(&lock_path, serde_json::to_string_pretty(&lock)?)
-            .context("failed to write code-graph-lock.json")?;
-        println!("Created: .poneglyph/code-graph-lock.json");
-    }
-
     // Inject usage rules into whichever of CLAUDE.md/AGENTS.md/.cursorrules
     // already exist in this project. Never creates a file the user doesn't have.
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    match detect::inject_agent_rules(&cwd) {
+    let target_dir = match project {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir().context("failed to read current directory")?,
+    };
+    match detect::inject_agent_rules(&target_dir) {
         Ok(results) if results.is_empty() => {}
         Ok(results) => {
             for (file, changed) in results {
@@ -356,22 +356,56 @@ fn cmd_init(config: &Config, write_global_config: bool) -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "failed to inject project rules"),
     }
 
+    if global_rules {
+        if let Some(home) = detect::home_dir() {
+            for ide in ["claude-code", "opencode"] {
+                match detect::inject_global_rules_import(ide, &home) {
+                    Ok(changed) => println!(
+                        "{ide}: {}",
+                        if changed { "global rules linked" } else { "global rules already linked" }
+                    ),
+                    Err(e) => tracing::warn!(error = %e, ide, "failed to link global rules"),
+                }
+            }
+        }
+    }
+
     if !write_global_config && !Config::default_config_path().exists() {
         println!("\nNo global config yet — run `poneglyph init --config` once to create one.");
     }
-    println!("\nNext: run `poneglyph wire <ide>` to set up IDE integration.");
+    println!("\nNext: run `poneglyph graph init` to build the code graph, `poneglyph wire all --agent <name>` to set up IDE integration.");
     Ok(())
 }
 
-/// Write `~/.config/poneglyph/config.toml` if it doesn't exist yet: every key
-/// present but commented, except values resolved by local-provider detection.
+/// Write `~/.config/poneglyph/config.toml`, prompting before overwriting a
+/// file from an older template version (renamed to `config.toml.bak` first).
 fn init_global_config() -> Result<()> {
     let config_path = Config::default_config_path();
     if config_path.exists() {
-        println!("Config already exists: {}", config_path.display());
-        return Ok(());
-    }
-    if let Some(dir) = config_path.parent() {
+        let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let existing_version = detect::parse_config_template_version(&existing);
+        if existing_version == Some(detect::CURRENT_CONFIG_TEMPLATE_VERSION) {
+            println!("Config already up to date: {}", config_path.display());
+            return Ok(());
+        }
+        print!(
+            "Existing config at {} predates the bundled template (version {} vs {}). Overwrite? [y/N] ",
+            config_path.display(),
+            existing_version.map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string()),
+            detect::CURRENT_CONFIG_TEMPLATE_VERSION
+        );
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("Left unchanged.");
+            return Ok(());
+        }
+        let backup_path = config_path.with_file_name("config.toml.bak");
+        std::fs::rename(&config_path, &backup_path)
+            .with_context(|| format!("failed to back up {} to {}", config_path.display(), backup_path.display()))?;
+        println!("Backed up old config to {}", backup_path.display());
+    } else if let Some(dir) = config_path.parent() {
         std::fs::create_dir_all(dir).context("failed to create config directory")?;
     }
     let detected = detect::detect_local_llm();
@@ -391,41 +425,85 @@ fn cmd_daemon(config: &Config, action: DaemonCommand) -> Result<()> {
     }
 }
 
-fn cmd_wire(config: &Config, ide: &str) -> Result<()> {
+fn cmd_wire(config: &Config, target: detect::WireTarget, agent: &str) -> Result<()> {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "poneglyph".to_string());
     let hooks_dir = Config::config_dir().join("hooks");
 
-    let outcome = detect::wire_agent(ide, &hooks_dir, &exe, config.agents.mcp_server_port)?;
-    println!("{:<14} {}", outcome.agent, outcome.status.as_str());
-    if ide == "claude-code" && outcome.status != detect::SetupStatus::Disabled {
-        println!(
-            "               note: `poneglyph mcp` is a persistent daemon — run \
-             `poneglyph daemon enable` to keep it running across logins, or start it \
-             manually (e.g. `poneglyph mcp &`), so Claude Code can reach \
-             http://127.0.0.1:{}/mcp",
-            config.agents.mcp_server_port
-        );
-    }
+    let agents: Vec<&str> = if agent == "*" {
+        detect::all_agent_names()
+    } else {
+        vec![agent]
+    };
 
-    // Auto-inject rules into global agent rule file.
-    if let Some(home) = detect::home_dir() {
-        match detect::inject_global_rules(ide, &home) {
-            Ok(changed) => {
-                if changed {
-                    println!("{:<14} rules injected", ide);
-                } else {
-                    println!("{:<14} rules already up to date", ide);
+    for a in agents {
+        let outcome = detect::wire_agent_bucket(a, target, &hooks_dir, &exe, config.agents.mcp_server_port)?;
+        println!("{:<14} {}", outcome.agent, outcome.status.as_str());
+        if a == "claude-code"
+            && matches!(outcome.status, detect::SetupStatus::Configured | detect::SetupStatus::AlreadyConfigured)
+        {
+            println!(
+                "               note: `poneglyph mcp` is a persistent daemon — run \
+                 `poneglyph daemon enable` to keep it running across logins, or start it \
+                 manually (e.g. `poneglyph mcp &`), so Claude Code can reach \
+                 http://127.0.0.1:{}/mcp",
+                config.agents.mcp_server_port
+            );
+        }
+
+        // Auto-inject rules into global agent rule file.
+        if let Some(home) = detect::home_dir() {
+            match detect::inject_global_rules(a, &home) {
+                Ok(changed) => {
+                    if changed {
+                        println!("{a:<14} rules injected");
+                    } else {
+                        println!("{a:<14} rules already up to date");
+                    }
                 }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to inject global rules");
+                Err(e) => {
+                    tracing::warn!(error = %e, agent = a, "failed to inject global rules");
+                }
             }
         }
     }
 
     Ok(())
+}
+
+async fn cmd_memory(config: &Config, action: MemoryCommand) -> Result<()> {
+    match action {
+        MemoryCommand::Remember {
+            content,
+            r#type,
+            importance,
+            project,
+            tag,
+        } => {
+            cmd_remember(
+                config,
+                &content,
+                &r#type,
+                importance,
+                project.as_deref(),
+                &tag,
+            )
+            .await
+        }
+        MemoryCommand::Recall { query, limit } => cmd_recall(config, &query, limit).await,
+        MemoryCommand::Forget { id } => cmd_forget(config, &id),
+        MemoryCommand::Export { format } => cmd_export(config, &format),
+        MemoryCommand::Context {
+            project,
+            max_tokens,
+        } => cmd_context(config, &project, max_tokens).await,
+        MemoryCommand::Consolidate { project } => cmd_consolidate(config, project.as_deref()).await,
+        MemoryCommand::Decay => cmd_decay(config),
+        MemoryCommand::SessionSummary { project, latest } => {
+            cmd_session_summary(config, project.as_deref(), latest).await
+        }
+    }
 }
 
 /// Load the embedding model, degrading to FTS-only operation on failure
@@ -488,15 +566,17 @@ async fn cmd_default(config: &Config) -> Result<()> {
     println!("{LOGO}");
 
     let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
-    let graph_update_task = spawn_graph_auto_update(store.clone(), shared_config.clone());
+    let graph_watch = spawn_graph_watch_supervisor(store.clone(), shared_config.clone());
 
     let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store.clone(), embedder.clone(), shared_config.clone())
-        .with_enrich(enrich.clone());
+        .with_enrich(enrich.clone())
+        .with_graph_dirty(graph_watch.dirty.clone());
     let mcp_state = poneglyph_http::AppState {
         store: store.clone(),
         embedder: embedder.clone(),
         config: shared_config.clone(),
         enrich: Some(enrich.clone()),
+        graph_dirty: Some(graph_watch.dirty.clone()),
     };
     let mcp_app = poneglyph_http::build_router(mcp_state)
         .route("/health", axum::routing::get(|| async { "ok" }))
@@ -511,6 +591,7 @@ async fn cmd_default(config: &Config) -> Result<()> {
         embedder,
         config: shared_config,
         enrich: Some(enrich),
+        graph_dirty: Some(graph_watch.dirty.clone()),
     };
     let viewer_listener = poneglyph_http::bind(config)
         .await
@@ -527,7 +608,7 @@ async fn cmd_default(config: &Config) -> Result<()> {
     };
 
     worker.abort();
-    graph_update_task.abort();
+    graph_watch.task.abort();
     result
 }
 
@@ -537,15 +618,17 @@ async fn cmd_default(config: &Config) -> Result<()> {
     println!("{LOGO}");
 
     let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
-    let graph_update_task = spawn_graph_auto_update(store.clone(), shared_config.clone());
+    let graph_watch = spawn_graph_watch_supervisor(store.clone(), shared_config.clone());
 
     let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store.clone(), embedder.clone(), shared_config.clone())
-        .with_enrich(enrich.clone());
+        .with_enrich(enrich.clone())
+        .with_graph_dirty(graph_watch.dirty.clone());
     let http_state = poneglyph_http::AppState {
         store,
         embedder,
         config: shared_config.clone(),
         enrich: Some(enrich),
+        graph_dirty: Some(graph_watch.dirty.clone()),
     };
     let app = poneglyph_http::build_router(http_state)
         .route("/health", axum::routing::get(|| async { "ok" }))
@@ -562,7 +645,7 @@ async fn cmd_default(config: &Config) -> Result<()> {
     };
 
     worker.abort();
-    graph_update_task.abort();
+    graph_watch.task.abort();
     result
 }
 
@@ -573,7 +656,7 @@ async fn cmd_default(config: &Config) -> Result<()> {
 /// editor-spawned-per-session shape for clients that need it.
 async fn cmd_mcp(config: &Config, stdio: bool) -> Result<()> {
     let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
-    let graph_update_task = spawn_graph_auto_update(store.clone(), shared_config.clone());
+    let graph_watch = spawn_graph_watch_supervisor(store.clone(), shared_config.clone());
 
     let health = poneglyph_core::llm::health(&config.llm).await;
     tracing::info!(
@@ -584,13 +667,14 @@ async fn cmd_mcp(config: &Config, stdio: bool) -> Result<()> {
     );
 
     let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store.clone(), embedder.clone(), shared_config.clone())
-        .with_enrich(enrich.clone());
+        .with_enrich(enrich.clone())
+        .with_graph_dirty(graph_watch.dirty.clone());
 
     if stdio {
         // NOTE: stdout belongs to MCP JSON-RPC from here on — no println!.
         let result = poneglyph_mcp::server::run_stdio(mcp).await;
         worker.abort(); // client gone; no more producers
-        graph_update_task.abort();
+        graph_watch.task.abort();
         return result;
     }
 
@@ -599,6 +683,7 @@ async fn cmd_mcp(config: &Config, stdio: bool) -> Result<()> {
         embedder,
         config: shared_config,
         enrich: Some(enrich),
+        graph_dirty: Some(graph_watch.dirty.clone()),
     };
     let app = poneglyph_http::build_router(http_state)
         .route("/health", axum::routing::get(|| async { "ok" }))
@@ -615,54 +700,134 @@ async fn cmd_mcp(config: &Config, stdio: bool) -> Result<()> {
     };
 
     worker.abort();
-    graph_update_task.abort();
+    graph_watch.task.abort();
     result
 }
 
-/// Periodically re-builds (incrementally) every project tracked in
-/// `graph_projects.toml`, so codegraph results stay fresh without the user
-/// running `graph update` by hand while the daemon is up.
-/// ponytail: fixed-interval polling, not file-watch — upgrade to a
-/// notify-based watch per project if polling proves too coarse.
-fn spawn_graph_auto_update(
-    store: Arc<Mutex<Store>>,
-    config: Arc<Config>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let minutes = config.graph.auto_update_minutes;
-        if minutes == 0 {
+/// Handle for the background graph-watch supervisor: the blocking task
+/// itself, plus the set of project ids with changes pending a debounced
+/// rebuild — `PoneglyphMcp` reads `dirty` to flag query responses as
+/// possibly-stale without blocking the request on a synchronous rebuild.
+struct GraphWatchHandle {
+    task: tokio::task::JoinHandle<()>,
+    dirty: Arc<Mutex<std::collections::HashSet<String>>>,
+}
+
+/// Replaces fixed-interval polling with real file-watching: one
+/// `notify::RecommendedWatcher` per project tracked in `graph_projects.toml`,
+/// debounced per project (`config.graph.watch_delay_ms`), so codegraph
+/// results stay fresh without the user running `graph update` by hand.
+/// `config.graph.auto_update_minutes` is repurposed from "rebuild interval"
+/// to "how often to reconcile the watched-project set against
+/// graph_projects.toml" (pick up projects `graph init`'d after the daemon
+/// started); 0 still means disabled entirely.
+fn spawn_graph_watch_supervisor(store: Arc<Mutex<Store>>, config: Arc<Config>) -> GraphWatchHandle {
+    let dirty: Arc<Mutex<std::collections::HashSet<String>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let dirty_for_task = dirty.clone();
+
+    let task = tokio::task::spawn_blocking(move || {
+        if config.graph.auto_update_minutes == 0 {
             return; // disabled
         }
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(minutes * 60));
-        interval.tick().await; // first tick fires immediately; skip it
+
+        let mut projects = graph_registry::load().map(|p| p.project).unwrap_or_default();
+        // Catch up once before watching, so a freshly-started daemon doesn't
+        // serve stale results until the first debounce window elapses.
+        for p in &projects {
+            rebuild_project(&store, &config, p);
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let mut watchers: std::collections::HashMap<String, notify::RecommendedWatcher> = std::collections::HashMap::new();
+        for p in &projects {
+            install_watcher(&mut watchers, &tx, &p.dir);
+        }
+
+        let mut last_event: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+        let debounce = std::time::Duration::from_millis(config.graph.watch_delay_ms);
+        let reconcile_every = std::time::Duration::from_secs(config.graph.auto_update_minutes * 60);
+        let mut last_reconcile = std::time::Instant::now();
+
         loop {
-            interval.tick().await;
-            let projects = match graph_registry::load() {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to read graph_projects.toml");
-                    continue;
-                }
-            };
-            for p in &projects.project {
-                let path = PathBuf::from(&p.dir);
-                if !path.is_dir() {
-                    continue;
-                }
-                let result = {
-                    let Ok(guard) = store.lock() else { continue };
-                    poneglyph_core::codegraph::build(&guard, &path, &config.graph, false)
-                };
-                match result {
-                    Ok(report) if report.files_parsed > 0 => {
-                        tracing::info!(dir = %p.dir, nodes = report.nodes, edges = report.edges, "auto graph update")
+            match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(dir) => {
+                    last_event.insert(dir.clone(), std::time::Instant::now());
+                    if let Some(p) = projects.iter().find(|p| p.dir == dir) {
+                        dirty_for_task.lock().unwrap().insert(p.id.clone());
                     }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(dir = %p.dir, error = %e, "auto graph update failed"),
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+
+            let ready: Vec<String> =
+                last_event.iter().filter(|(_, t)| t.elapsed() >= debounce).map(|(dir, _)| dir.clone()).collect();
+            for dir in ready {
+                last_event.remove(&dir);
+                if let Some(p) = projects.iter().find(|p| p.dir == dir) {
+                    rebuild_project(&store, &config, p);
+                    dirty_for_task.lock().unwrap().remove(&p.id);
+                }
+            }
+
+            if last_reconcile.elapsed() >= reconcile_every {
+                last_reconcile = std::time::Instant::now();
+                if let Ok(fresh) = graph_registry::load() {
+                    let fresh = fresh.project;
+                    watchers.retain(|dir, _| fresh.iter().any(|p| &p.dir == dir));
+                    for p in &fresh {
+                        if !watchers.contains_key(&p.dir) {
+                            install_watcher(&mut watchers, &tx, &p.dir);
+                        }
+                    }
+                    projects = fresh;
                 }
             }
         }
-    })
+    });
+
+    GraphWatchHandle { task, dirty }
+}
+
+fn install_watcher(
+    watchers: &mut std::collections::HashMap<String, notify::RecommendedWatcher>,
+    tx: &std::sync::mpsc::Sender<String>,
+    dir: &str,
+) {
+    use notify::Watcher;
+    if !Path::new(dir).is_dir() {
+        return;
+    }
+    let dir_owned = dir.to_string();
+    let tx = tx.clone();
+    let Ok(mut watcher) = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            let _ = tx.send(dir_owned.clone());
+        }
+    }) else {
+        return;
+    };
+    if watcher.watch(Path::new(dir), notify::RecursiveMode::Recursive).is_ok() {
+        watchers.insert(dir.to_string(), watcher);
+    }
+}
+
+fn rebuild_project(store: &Arc<Mutex<Store>>, config: &Config, p: &graph_registry::GraphProjectEntry) {
+    let path = PathBuf::from(&p.dir);
+    if !path.is_dir() {
+        return;
+    }
+    let result = {
+        let Ok(guard) = store.lock() else { return };
+        poneglyph_core::codegraph::build(&guard, &path, &config.graph, false)
+    };
+    match result {
+        Ok(report) if report.files_parsed > 0 => {
+            tracing::info!(dir = %p.dir, nodes = report.nodes, edges = report.edges, "graph rebuilt")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(dir = %p.dir, error = %e, "graph rebuild failed"),
+    }
 }
 
 /// HTTP dashboard + graph viewer only — for browsing in a browser.
@@ -680,6 +845,9 @@ async fn cmd_viewer(config: &Config) -> Result<()> {
         embedder,
         config: shared_config,
         enrich: Some(enrich),
+        // ponytail: no file watcher in this command path, so this view of
+        // the graph can never be stale — `poneglyph mcp` is what rebuilds.
+        graph_dirty: None,
     };
 
     println!(
@@ -996,7 +1164,38 @@ async fn cmd_eval(config: &Config, dataset: &std::path::Path, limit: Option<usiz
     Ok(())
 }
 
-fn cmd_status(config: &Config) -> Result<()> {
+/// Prune dead project registrations: graph_projects.toml entries and
+/// memory `projects` rows whose directory no longer exists on disk. Never
+/// touches `cg_files`/`cg_nodes` (no project scoping exists there) and
+/// never deletes memories (`project_id` FK is `ON DELETE SET NULL`).
+fn cmd_cleanup(config: &Config) -> Result<()> {
+    config.ensure_dirs()?;
+    let mut any = false;
+
+    for p in graph_registry::load()?.project {
+        if !Path::new(&p.dir).exists() {
+            graph_registry::unregister(&p.dir)?;
+            println!("Removed graph registration: {}", p.dir);
+            any = true;
+        }
+    }
+
+    let store = Store::open(&config.db_path)?;
+    for p in store.list_projects()? {
+        if !Path::new(&p.path).exists() {
+            store.delete_project_by_path(&p.path)?;
+            println!("Removed project record: {}", p.path);
+            any = true;
+        }
+    }
+
+    if !any {
+        println!("Nothing to clean up.");
+    }
+    Ok(())
+}
+
+async fn cmd_status(config: &Config) -> Result<()> {
     config.ensure_dirs()?;
     let store = Store::open(&config.db_path)?;
     let stats = store.stats()?;
@@ -1012,6 +1211,28 @@ fn cmd_status(config: &Config) -> Result<()> {
         "Enrichment:  {}",
         if config.llm.enabled { "on" } else { "off" }
     );
+
+    let mcp_listening = daemon::port_open(config.agents.mcp_server_port);
+    println!(
+        "MCP port:    {} ({})",
+        config.agents.mcp_server_port,
+        if mcp_listening { "listening" } else { "not listening" }
+    );
+    println!(
+        "LLM base URL:{}",
+        config.llm.base_url.as_deref().unwrap_or("(provider default)")
+    );
+    println!("LLM model:   {}", config.llm.model.as_deref().unwrap_or("(unset)"));
+    if config.llm.enabled {
+        let health = poneglyph_core::llm::health(&config.llm).await;
+        println!(
+            "LLM health:  {}{}",
+            if health.reachable { "reachable" } else { "unreachable" },
+            health.status.map(|s| format!(" ({s})")).unwrap_or_default()
+        );
+    } else {
+        println!("LLM health:  (enrichment disabled)");
+    }
 
     if Config::using_legacy_paths() {
         println!();
@@ -1031,21 +1252,23 @@ fn cmd_graph(config: &Config, action: GraphCommand) -> Result<()> {
 
     match action {
         GraphCommand::Init { path } => {
+            create_graph_project_files(&path)?;
             let report = codegraph::build(&store, &path, &config.graph, true)?;
             print_build_report(&report);
-            update_graph_lock();
+            update_graph_lock(&path);
             register_for_auto_update(&store, &path);
         }
         GraphCommand::Update { path } => {
             let report = codegraph::build(&store, &path, &config.graph, false)?;
             print_build_report(&report);
-            update_graph_lock();
+            update_graph_lock(&path);
             register_for_auto_update(&store, &path);
         }
         GraphCommand::Watch { path } => cmd_graph_watch(&store, &path, config)?,
-        GraphCommand::Query { q } => {
+        GraphCommand::Query { q, path } => {
+            let project = poneglyph_core::project::detect_project(&store, &path.canonicalize()?.to_string_lossy())?;
             let query = codegraph::parse_query(&q);
-            let results = codegraph::run_query(&store, &query)?;
+            let results = codegraph::run_query(&store, &project.id, &query)?;
             if results.is_empty() {
                 println!("No matches.");
             }
@@ -1053,9 +1276,10 @@ fn cmd_graph(config: &Config, action: GraphCommand) -> Result<()> {
                 println!("[{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
             }
         }
-        GraphCommand::BlastRadius { target, depth } => {
+        GraphCommand::BlastRadius { target, depth, path } => {
+            let project = poneglyph_core::project::detect_project(&store, &path.canonicalize()?.to_string_lossy())?;
             let depth = depth.unwrap_or(config.graph.blast_radius_depth);
-            let report = codegraph::blast_radius(&store, &target, depth)?;
+            let report = codegraph::blast_radius(&store, &project.id, &target, depth)?;
             if report.root.is_empty() {
                 println!("No file or symbol matching '{target}' found in the graph.");
                 return Ok(());
@@ -1079,22 +1303,67 @@ fn cmd_graph(config: &Config, action: GraphCommand) -> Result<()> {
                 println!("  {} — {}:{}", t.name, t.file_path, t.start_line);
             }
         }
-        GraphCommand::Export { format, out } => {
+        GraphCommand::Export { format, out, path } => {
+            let project = poneglyph_core::project::detect_project(&store, &path.canonicalize()?.to_string_lossy())?;
             let rendered = match format.as_str() {
-                "json" => codegraph::export_json(&store)?,
-                "dot" => codegraph::export_dot(&store)?,
-                "graphml" => codegraph::export_graphml(&store)?,
+                "json" => codegraph::export_json(&store, &project.id)?,
+                "dot" => codegraph::export_dot(&store, &project.id)?,
+                "graphml" => codegraph::export_graphml(&store, &project.id)?,
                 other => {
                     anyhow::bail!("unknown export format '{other}' (use json, dot, or graphml)")
                 }
             };
             match out {
-                Some(path) => {
-                    std::fs::write(&path, rendered)
-                        .with_context(|| format!("failed to write {}", path.display()))?;
-                    println!("Exported: {}", path.display());
+                Some(out_path) => {
+                    std::fs::write(&out_path, rendered)
+                        .with_context(|| format!("failed to write {}", out_path.display()))?;
+                    println!("Exported: {}", out_path.display());
                 }
                 None => println!("{rendered}"),
+            }
+        }
+        GraphCommand::Explore { target, depth, path } => {
+            let abs_path = path.canonicalize()?;
+            let project = poneglyph_core::project::detect_project(&store, &abs_path.to_string_lossy())?;
+            let depth = depth.unwrap_or(config.graph.blast_radius_depth);
+            let report = codegraph::explore(&store, &project.id, &abs_path, &target, depth)?;
+            if report.root.is_empty() {
+                println!("No file or symbol matching '{target}' found in the graph.");
+                return Ok(());
+            }
+            println!("Root ({} symbol(s)):", report.root.len());
+            for n in &report.root {
+                println!("  [{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
+            }
+            for s in &report.snippets {
+                println!("\n--- {} ({}:{}-{}) ---\n{}", s.node_id, s.file_path, s.start_line, s.end_line, s.source);
+            }
+            println!("\nCallers ({}):", report.callers.len());
+            for n in &report.callers {
+                println!("  [{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
+            }
+            println!("\nCallees ({}):", report.callees.len());
+            for n in &report.callees {
+                println!("  [{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
+            }
+            println!("\nSupertypes ({}):", report.supertypes.len());
+            for n in &report.supertypes {
+                println!("  [{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
+            }
+            println!("\nSubtypes ({}):", report.subtypes.len());
+            for n in &report.subtypes {
+                println!("  [{}] {} — {}:{}", n.kind, n.name, n.file_path, n.start_line);
+            }
+            println!("\nTests ({}):", report.tests.len());
+            for t in &report.tests {
+                println!("  {} — {}:{}", t.name, t.file_path, t.start_line);
+            }
+            println!("\nBlast radius dependents ({}):", report.blast_radius.dependents.len());
+            for d in &report.blast_radius.dependents {
+                println!(
+                    "  depth {} [{}] {} — {}:{}",
+                    d.depth, d.node.kind, d.node.name, d.node.file_path, d.node.start_line
+                );
             }
         }
     }
@@ -1136,7 +1405,7 @@ fn cmd_graph_watch(store: &Store, path: &std::path::Path, config: &Config) -> Re
         match poneglyph_core::codegraph::build(store, path, &config.graph, false) {
             Ok(report) => {
                 print_build_report(&report);
-                update_graph_lock();
+                update_graph_lock(path);
             }
             Err(e) => tracing::warn!(error = %e, "graph update failed"),
         }
@@ -1160,13 +1429,13 @@ fn register_for_auto_update(store: &Store, path: &std::path::Path) {
     }
 }
 
-/// Update `last_build` timestamp in `.poneglyph/code-graph-lock.json`.
-fn update_graph_lock() {
-    let lock_path = std::path::Path::new(".poneglyph/code-graph-lock.json");
+/// Update `last_build` timestamp in `<path>/.poneglyph/code-graph-lock.json`.
+fn update_graph_lock(path: &Path) {
+    let lock_path = path.join(".poneglyph/code-graph-lock.json");
     if !lock_path.exists() {
         return;
     }
-    let Ok(raw) = std::fs::read_to_string(lock_path) else {
+    let Ok(raw) = std::fs::read_to_string(&lock_path) else {
         return;
     };
     let Ok(mut lock) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -1174,9 +1443,38 @@ fn update_graph_lock() {
     };
     lock["last_build"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
     let _ = std::fs::write(
-        lock_path,
+        &lock_path,
         serde_json::to_string_pretty(&lock).unwrap_or_default(),
     );
+}
+
+/// Create `.poneglyphignore` and `.poneglyph/code-graph-lock.json` at `path`
+/// if missing. Only `graph init` creates these now — project `init` doesn't.
+fn create_graph_project_files(path: &Path) -> Result<()> {
+    let ignore_path = path.join(".poneglyphignore");
+    if !ignore_path.exists() {
+        std::fs::write(
+            &ignore_path,
+            "node_modules/\ntarget/\nvendor/\n.git/\ndist/\nbuild/\nout/\n.DS_Store\n",
+        )?;
+        println!("Created: {}", ignore_path.display());
+    }
+
+    let lock_dir = path.join(".poneglyph");
+    let lock_path = lock_dir.join("code-graph-lock.json");
+    if !lock_path.exists() {
+        std::fs::create_dir_all(&lock_dir).context("failed to create .poneglyph directory")?;
+        let lock = serde_json::json!({
+            "version": 1,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "last_build": null,
+            "languages": ["rust", "typescript", "javascript", "python", "go"]
+        });
+        std::fs::write(&lock_path, serde_json::to_string_pretty(&lock)?)
+            .context("failed to write code-graph-lock.json")?;
+        println!("Created: {}", lock_path.display());
+    }
+    Ok(())
 }
 
 async fn cmd_session_summary(

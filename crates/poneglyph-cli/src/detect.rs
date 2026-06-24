@@ -23,6 +23,8 @@ pub enum SetupStatus {
     AlreadyConfigured,
     NotDetected,
     Disabled,
+    /// The requested bucket isn't one this agent supports (e.g. `hooks` for cursor).
+    NotApplicable,
 }
 
 impl SetupStatus {
@@ -32,8 +34,157 @@ impl SetupStatus {
             Self::AlreadyConfigured => "already configured",
             Self::NotDetected => "not detected",
             Self::Disabled => "disabled in [agents] config",
+            Self::NotApplicable => "not applicable for this agent",
         }
     }
+}
+
+/// `poneglyph wire <target> --agent <name>` — which piece(s) to (re)wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum WireTarget {
+    All,
+    Mcp,
+    Hooks,
+    Skills,
+}
+
+/// Which wire buckets each agent supports. claude-code/opencode have hook
+/// scripts and a skill file; the rest only register an MCP server entry.
+fn agent_buckets(agent: &str) -> &'static [&'static str] {
+    match agent {
+        "claude-code" | "opencode" => &["mcp", "hooks", "skills"],
+        "cursor" | "gemini" | "codex" | "copilot" => &["mcp"],
+        _ => &[],
+    }
+}
+
+/// The agent names compiled into this binary (mirrors the `#[cfg(feature)]`
+/// ladder elsewhere in this module) — used for `--agent '*'` and error messages.
+pub fn all_agent_names() -> Vec<&'static str> {
+    #[allow(unused_mut)]
+    let mut opts = vec!["claude-code"];
+    #[cfg(feature = "opencode")]
+    opts.push("opencode");
+    #[cfg(feature = "cursor")]
+    opts.push("cursor");
+    #[cfg(feature = "gemini")]
+    opts.push("gemini");
+    #[cfg(feature = "codex")]
+    opts.push("codex");
+    #[cfg(feature = "copilot")]
+    opts.push("copilot");
+    opts
+}
+
+/// Agent's display label, e.g. "gemini" -> "gemini-cli". Used so error/status
+/// output matches the labels `setup_*` functions have always used.
+fn agent_label(agent: &str) -> &'static str {
+    match agent {
+        "claude-code" => "claude-code",
+        "opencode" => "opencode",
+        "cursor" => "cursor",
+        "gemini" => "gemini-cli",
+        "codex" => "codex",
+        "copilot" => "copilot-cli",
+        _ => "unknown",
+    }
+}
+
+/// Does this agent's config directory exist on disk? Same probe each
+/// `setup_*` function already does before touching anything.
+fn agent_detected(agent: &str, home: &Path) -> bool {
+    match agent {
+        "claude-code" => home.join(".claude").exists(),
+        "opencode" => home.join(".config").join("opencode").exists(),
+        "cursor" => home.join(".cursor").exists(),
+        "gemini" => home.join(".gemini").exists(),
+        "codex" => home.join(".codex").exists(),
+        "copilot" => std::env::var_os("COPILOT_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".copilot"))
+            .exists(),
+        _ => false,
+    }
+}
+
+/// Run one bucket (or, for `WireTarget::All`, every bucket the agent
+/// supports) for one agent. A bucket the agent doesn't support is reported
+/// as `NotApplicable`, not an error.
+pub fn wire_agent_bucket(
+    agent: &str,
+    target: WireTarget,
+    hooks_dir: &Path,
+    exe: &str,
+    mcp_port: u16,
+) -> Result<SetupOutcome> {
+    let Some(home) = home_dir() else {
+        anyhow::bail!("could not resolve home directory");
+    };
+    let supported = agent_buckets(agent);
+    if supported.is_empty() {
+        anyhow::bail!("unknown agent '{agent}'. Options: {}", all_agent_names().join(", "));
+    }
+    if !agent_detected(agent, &home) {
+        return Ok(SetupOutcome {
+            agent: agent_label(agent),
+            status: SetupStatus::NotDetected,
+        });
+    }
+
+    let wanted: Vec<&str> = match target {
+        WireTarget::All => supported.to_vec(),
+        WireTarget::Mcp if supported.contains(&"mcp") => vec!["mcp"],
+        WireTarget::Hooks if supported.contains(&"hooks") => vec!["hooks"],
+        WireTarget::Skills if supported.contains(&"skills") => vec!["skills"],
+        _ => vec![],
+    };
+    if wanted.is_empty() {
+        return Ok(SetupOutcome {
+            agent: agent_label(agent),
+            status: SetupStatus::NotApplicable,
+        });
+    }
+
+    let mut changed = false;
+    for bucket in wanted {
+        changed |= match (agent, bucket) {
+            ("claude-code", "mcp") => claude_code_mcp(&home, exe, mcp_port)?,
+            ("claude-code", "hooks") => claude_code_hooks(&home, hooks_dir)?,
+            ("claude-code", "skills") => claude_code_skills(&home)?,
+            #[cfg(feature = "opencode")]
+            ("opencode", "mcp") => opencode_mcp(&home, exe)?,
+            #[cfg(feature = "opencode")]
+            ("opencode", "hooks") => opencode_hooks(&home)?,
+            #[cfg(feature = "opencode")]
+            ("opencode", "skills") => opencode_skills(&home)?,
+            #[cfg(feature = "cursor")]
+            ("cursor", "mcp") => {
+                merge_json_mcp_server(&home.join(".cursor").join("mcp.json"), "mcpServers", true, exe, None)?
+            }
+            #[cfg(feature = "gemini")]
+            ("gemini", "mcp") => merge_json_mcp_server(
+                &home.join(".gemini").join("settings.json"),
+                "mcpServers",
+                true,
+                exe,
+                None,
+            )?,
+            #[cfg(feature = "codex")]
+            ("codex", "mcp") => merge_codex_mcp_server(&home.join(".codex").join("config.toml"), exe)?,
+            #[cfg(feature = "copilot")]
+            ("copilot", "mcp") => {
+                let copilot_home = std::env::var_os("COPILOT_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".copilot"));
+                merge_json_mcp_server(&copilot_home.join("mcp-config.json"), "mcpServers", true, exe, None)?
+            }
+            _ => unreachable!("bucket '{bucket}' not in {agent}'s capability list"),
+        };
+    }
+    Ok(SetupOutcome {
+        agent: agent_label(agent),
+        status: if changed { SetupStatus::Configured } else { SetupStatus::AlreadyConfigured },
+    })
 }
 
 pub struct SetupOutcome {
@@ -80,41 +231,6 @@ pub fn run_agent_setup(
     Ok(out)
 }
 
-/// Wire up a single agent by name. Always enabled (ignores config flags).
-pub fn wire_agent(ide: &str, hooks_dir: &Path, exe: &str, mcp_port: u16) -> Result<SetupOutcome> {
-    let Some(home) = home_dir() else {
-        anyhow::bail!("could not resolve home directory");
-    };
-    match ide {
-        "claude-code" => setup_claude_code(true, &home, hooks_dir, exe, mcp_port),
-        #[cfg(feature = "opencode")]
-        "opencode" => setup_opencode(true, &home, exe),
-        #[cfg(feature = "cursor")]
-        "cursor" => setup_cursor(true, &home, exe),
-        #[cfg(feature = "gemini")]
-        "gemini" => setup_gemini_cli(true, &home, exe),
-        #[cfg(feature = "codex")]
-        "codex" => setup_codex(true, &home, exe),
-        #[cfg(feature = "copilot")]
-        "copilot" => setup_copilot_cli(true, &home, exe),
-        _ => {
-            #[allow(unused_mut)]
-            let mut opts = vec!["claude-code"];
-            #[cfg(feature = "opencode")]
-            opts.push("opencode");
-            #[cfg(feature = "cursor")]
-            opts.push("cursor");
-            #[cfg(feature = "gemini")]
-            opts.push("gemini");
-            #[cfg(feature = "codex")]
-            opts.push("codex");
-            #[cfg(feature = "copilot")]
-            opts.push("copilot");
-            anyhow::bail!("unknown IDE '{ide}'. Options: {}", opts.join(", "))
-        }
-    }
-}
-
 /// Inject poneglyph usage rules into the global agent rule file.
 pub fn inject_global_rules(ide: &str, home: &Path) -> Result<bool> {
     let path = match ide {
@@ -138,6 +254,65 @@ pub fn inject_global_rules(ide: &str, home: &Path) -> Result<bool> {
     inject_rules_block(&path)
 }
 
+/// `init -g`: for claude-code/opencode only, write the rules block to a
+/// sibling `{CLAUDE/AGENTS}.poneglyph.md` file and ensure the main rule file
+/// `@import`s it (matching the `@file` include convention those two already
+/// support), instead of injecting the block inline like `inject_global_rules`
+/// does for the other agents.
+pub fn inject_global_rules_import(ide: &str, home: &Path) -> Result<bool> {
+    let (main_path, sibling_name) = match ide {
+        "claude-code" => (home.join(".claude").join("CLAUDE.md"), "CLAUDE.poneglyph.md"),
+        #[cfg(feature = "opencode")]
+        "opencode" => (
+            home.join(".config").join("opencode").join("AGENTS.md"),
+            "AGENTS.poneglyph.md",
+        ),
+        _ => return Ok(false),
+    };
+    let sibling_path = main_path.with_file_name(sibling_name);
+    if let Some(parent) = sibling_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let sibling_changed = inject_rules_block(&sibling_path)?;
+
+    let import_line = format!("@{sibling_name}");
+    let existing = if main_path.exists() {
+        std::fs::read_to_string(&main_path)
+            .with_context(|| format!("failed to read {}", main_path.display()))?
+    } else {
+        String::new()
+    };
+    let main_changed = if existing.lines().any(|l| l.trim() == import_line) {
+        false
+    } else {
+        let sep = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+        if let Some(parent) = main_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::write(&main_path, format!("{existing}{sep}{import_line}\n"))
+            .with_context(|| format!("failed to write {}", main_path.display()))?;
+        true
+    };
+    Ok(sibling_changed || main_changed)
+}
+
+/// `poneglyph mcp` is a persistent HTTP daemon now, not session-spawned —
+/// register it as a remote server rather than a stdio command.
+fn claude_code_mcp(home: &Path, exe: &str, mcp_port: u16) -> Result<bool> {
+    merge_json_mcp_server(&home.join(".claude.json"), "mcpServers", true, exe, Some(mcp_port))
+}
+
+fn claude_code_hooks(home: &Path, hooks_dir: &Path) -> Result<bool> {
+    install_hook_scripts(hooks_dir)?;
+    merge_claude_code_hooks(&home.join(".claude").join("settings.json"), hooks_dir)
+}
+
+fn claude_code_skills(home: &Path) -> Result<bool> {
+    install_skill_file(&home.join(".claude").join("skills"))
+}
+
 fn setup_claude_code(
     enabled: bool,
     home: &Path,
@@ -159,18 +334,9 @@ fn setup_claude_code(
         });
     }
 
-    install_hook_scripts(hooks_dir)?;
-    let hooks_changed = merge_claude_code_hooks(&claude_dir.join("settings.json"), hooks_dir)?;
-    // `poneglyph mcp` is a persistent HTTP daemon now, not session-spawned —
-    // register it as a remote server rather than a stdio command.
-    let mcp_changed = merge_json_mcp_server(
-        &home.join(".claude.json"),
-        "mcpServers",
-        true,
-        exe,
-        Some(mcp_port),
-    )?;
-    let skill_changed = install_skill_file(&claude_dir.join("skills"))?;
+    let hooks_changed = claude_code_hooks(home, hooks_dir)?;
+    let mcp_changed = claude_code_mcp(home, exe, mcp_port)?;
+    let skill_changed = claude_code_skills(home)?;
 
     let status = if hooks_changed || mcp_changed || skill_changed {
         SetupStatus::Configured
@@ -245,6 +411,26 @@ fn setup_gemini_cli(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcom
 }
 
 #[cfg(feature = "opencode")]
+fn opencode_dir(home: &Path) -> PathBuf {
+    home.join(".config").join("opencode")
+}
+
+#[cfg(feature = "opencode")]
+fn opencode_mcp(home: &Path, exe: &str) -> Result<bool> {
+    merge_opencode_mcp_server(&opencode_dir(home).join("opencode.json"), exe)
+}
+
+#[cfg(feature = "opencode")]
+fn opencode_hooks(home: &Path) -> Result<bool> {
+    install_opencode_plugin(&opencode_dir(home).join("plugins"))
+}
+
+#[cfg(feature = "opencode")]
+fn opencode_skills(home: &Path) -> Result<bool> {
+    install_opencode_skill(&opencode_dir(home).join("skills"))
+}
+
+#[cfg(feature = "opencode")]
 fn setup_opencode(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome> {
     if !enabled {
         return Ok(SetupOutcome {
@@ -252,16 +438,15 @@ fn setup_opencode(enabled: bool, home: &Path, exe: &str) -> Result<SetupOutcome>
             status: SetupStatus::Disabled,
         });
     }
-    let opencode_dir = home.join(".config").join("opencode");
-    if !opencode_dir.exists() {
+    if !opencode_dir(home).exists() {
         return Ok(SetupOutcome {
             agent: "opencode",
             status: SetupStatus::NotDetected,
         });
     }
-    let plugin_changed = install_opencode_plugin(&opencode_dir.join("plugins"))?;
-    let mcp_changed = merge_opencode_mcp_server(&opencode_dir.join("opencode.json"), exe)?;
-    let skill_changed = install_opencode_skill(&opencode_dir.join("skills"))?;
+    let plugin_changed = opencode_hooks(home)?;
+    let mcp_changed = opencode_mcp(home, exe)?;
+    let skill_changed = opencode_skills(home)?;
     let status = if plugin_changed || mcp_changed || skill_changed {
         SetupStatus::Configured
     } else {
@@ -704,6 +889,22 @@ pub fn detect_local_llm() -> Detected {
 /// `format!` placeholders, since the template itself contains literal
 /// `{ }` for poneglyph's own env-var interpolation syntax).
 const CONFIG_TEMPLATE: &str = include_str!("assets/config-template.toml");
+
+/// Bumped whenever `config-template.toml` changes, so `init --config` can
+/// tell a user's existing file apart from a stale one.
+pub const CURRENT_CONFIG_TEMPLATE_VERSION: u32 = 2;
+
+/// Parse the `# poneglyph-config-version: N` marker from a config.toml's
+/// text. `None` if absent (pre-versioning file) or unparseable.
+pub fn parse_config_template_version(content: &str) -> Option<u32> {
+    content
+        .lines()
+        .next()?
+        .strip_prefix("# poneglyph-config-version:")?
+        .trim()
+        .parse()
+        .ok()
+}
 
 /// Render a full `config.toml`: every key from the schema is present, but
 /// commented (so the figment defaults layer applies) unless detection found

@@ -16,14 +16,19 @@ pub enum GraphQuery {
     CalleesOf(String),
     ImportsOf(String),
     TestsFor(String),
+    /// `subtypes_of:<name>` — who extends/implements this (incoming Extends).
+    Subtypes(String),
+    /// `supertypes_of:<name>` — what this extends/implements (outgoing Extends).
+    Supertypes(String),
     /// `path:<from>..<to>` — shortest call/import chain between two symbols.
     Path(String, String),
     Keyword(String),
 }
 
 /// Parses `callers_of:<name>`, `callees_of:<name>`, `imports_of:<name>`,
-/// `tests_for:<name>`, `path:<from>..<to>`; anything else (including a bare
-/// name) is a keyword search.
+/// `tests_for:<name>`, `subtypes_of:<name>`, `supertypes_of:<name>`,
+/// `path:<from>..<to>`; anything else (including a bare name) is a keyword
+/// search.
 pub fn parse_query(input: &str) -> GraphQuery {
     let trimmed = input.trim();
     for (prefix, ctor) in [
@@ -31,6 +36,8 @@ pub fn parse_query(input: &str) -> GraphQuery {
         ("callees_of:", GraphQuery::CalleesOf as fn(String) -> GraphQuery),
         ("imports_of:", GraphQuery::ImportsOf as fn(String) -> GraphQuery),
         ("tests_for:", GraphQuery::TestsFor as fn(String) -> GraphQuery),
+        ("subtypes_of:", GraphQuery::Subtypes as fn(String) -> GraphQuery),
+        ("supertypes_of:", GraphQuery::Supertypes as fn(String) -> GraphQuery),
     ] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             return ctor(rest.trim().to_string());
@@ -44,30 +51,33 @@ pub fn parse_query(input: &str) -> GraphQuery {
     GraphQuery::Keyword(trimmed.to_string())
 }
 
-fn first_match_by_name(store: &Store, name: &str) -> Result<Option<CgNode>> {
-    Ok(store.cg_nodes_by_name(name, &[CgNodeKind::Function, CgNodeKind::Method, CgNodeKind::Type])?.into_iter().next())
+fn first_match_by_name(store: &Store, project_id: &str, name: &str) -> Result<Option<CgNode>> {
+    Ok(store
+        .cg_nodes_by_name(project_id, name, &[CgNodeKind::Function, CgNodeKind::Method, CgNodeKind::Type])?
+        .into_iter()
+        .next())
 }
 
-pub fn run(store: &Store, query: &GraphQuery) -> Result<Vec<CgNode>> {
+pub fn run(store: &Store, project_id: &str, query: &GraphQuery) -> Result<Vec<CgNode>> {
     match query {
         GraphQuery::CallersOf(name) => {
-            let Some(target) = first_match_by_name(store, name)? else { return Ok(Vec::new()) };
-            store.cg_edges_into(&target.id, CgEdgeKind::Calls)
+            let Some(target) = first_match_by_name(store, project_id, name)? else { return Ok(Vec::new()) };
+            store.cg_edges_into(project_id, &target.id, CgEdgeKind::Calls)
         }
         GraphQuery::CalleesOf(name) => {
-            let Some(target) = first_match_by_name(store, name)? else { return Ok(Vec::new()) };
-            store.cg_edges_out_of(&target.id, CgEdgeKind::Calls)
+            let Some(target) = first_match_by_name(store, project_id, name)? else { return Ok(Vec::new()) };
+            store.cg_edges_out_of(project_id, &target.id, CgEdgeKind::Calls)
         }
         GraphQuery::ImportsOf(name) => {
-            let candidates = store.cg_nodes_by_name(name, &[CgNodeKind::Import])?;
+            let candidates = store.cg_nodes_by_name(project_id, name, &[CgNodeKind::Import])?;
             let mut out = Vec::new();
             for c in candidates {
-                out.extend(store.cg_edges_into(&c.id, CgEdgeKind::Imports)?);
+                out.extend(store.cg_edges_into(project_id, &c.id, CgEdgeKind::Imports)?);
             }
             if out.is_empty() {
                 // Fall back to substring match on import text (the raw `use`/`import` statement).
                 out = store
-                    .cg_search_by_name(name, 50)?
+                    .cg_search_by_name(project_id, name, 50)?
                     .into_iter()
                     .filter(|n| n.kind == CgNodeKind::Import)
                     .collect();
@@ -75,20 +85,28 @@ pub fn run(store: &Store, query: &GraphQuery) -> Result<Vec<CgNode>> {
             Ok(out)
         }
         GraphQuery::TestsFor(name) => {
-            let Some(target) = first_match_by_name(store, name)? else { return Ok(Vec::new()) };
-            store.cg_edges_into(&target.id, CgEdgeKind::Tests)
+            let Some(target) = first_match_by_name(store, project_id, name)? else { return Ok(Vec::new()) };
+            store.cg_edges_into(project_id, &target.id, CgEdgeKind::Tests)
         }
-        GraphQuery::Path(from, to) => shortest_path(store, from, to),
-        GraphQuery::Keyword(kw) => store.cg_search_by_name(kw, 50),
+        GraphQuery::Subtypes(name) => {
+            let Some(target) = first_match_by_name(store, project_id, name)? else { return Ok(Vec::new()) };
+            store.cg_edges_into(project_id, &target.id, CgEdgeKind::Extends)
+        }
+        GraphQuery::Supertypes(name) => {
+            let Some(target) = first_match_by_name(store, project_id, name)? else { return Ok(Vec::new()) };
+            store.cg_edges_out_of(project_id, &target.id, CgEdgeKind::Extends)
+        }
+        GraphQuery::Path(from, to) => shortest_path(store, project_id, from, to),
+        GraphQuery::Keyword(kw) => store.cg_search_by_name(project_id, kw, 50),
     }
 }
 
 /// BFS over forward Calls+Imports edges — shortest hop count, not weighted.
 /// Returns the node chain from `from` to `to` inclusive, or empty if either
 /// symbol is unknown or no path exists within the graph.
-fn shortest_path(store: &Store, from: &str, to: &str) -> Result<Vec<CgNode>> {
-    let Some(start) = first_match_by_name(store, from)? else { return Ok(Vec::new()) };
-    let Some(end) = first_match_by_name(store, to)? else { return Ok(Vec::new()) };
+fn shortest_path(store: &Store, project_id: &str, from: &str, to: &str) -> Result<Vec<CgNode>> {
+    let Some(start) = first_match_by_name(store, project_id, from)? else { return Ok(Vec::new()) };
+    let Some(end) = first_match_by_name(store, project_id, to)? else { return Ok(Vec::new()) };
     if start.id == end.id {
         return Ok(vec![start]);
     }
@@ -100,8 +118,8 @@ fn shortest_path(store: &Store, from: &str, to: &str) -> Result<Vec<CgNode>> {
     queue.push_back(start.id.clone());
 
     while let Some(current_id) = queue.pop_front() {
-        let mut neighbors = store.cg_edges_out_of(&current_id, CgEdgeKind::Calls)?;
-        neighbors.extend(store.cg_edges_out_of(&current_id, CgEdgeKind::Imports)?);
+        let mut neighbors = store.cg_edges_out_of(project_id, &current_id, CgEdgeKind::Calls)?;
+        neighbors.extend(store.cg_edges_out_of(project_id, &current_id, CgEdgeKind::Imports)?);
 
         for next in neighbors {
             if visited.contains_key(&next.id) {
@@ -141,13 +159,18 @@ mod tests {
     use crate::store::Store;
     use tempfile::tempdir;
 
-    fn build_fixture() -> (tempfile::TempDir, Store) {
+    fn pid(store: &Store, dir: &std::path::Path) -> String {
+        crate::project::detect_project(store, &dir.to_string_lossy()).unwrap().id
+    }
+
+    fn build_fixture() -> (tempfile::TempDir, Store, String) {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("a.py"), "def add(a, b):\n    return a + b\n\ndef test_add():\n    assert add(1, 2) == 3\n").unwrap();
         std::fs::write(dir.path().join("b.py"), "from a import add\n\ndef use_add():\n    return add(1, 2)\n").unwrap();
         let store = Store::open_in_memory().unwrap();
         super::super::build::build(&store, dir.path(), &CodeGraphConfig::default(), true).unwrap();
-        (dir, store)
+        let project_id = pid(&store, dir.path());
+        (dir, store, project_id)
     }
 
     #[test]
@@ -166,23 +189,24 @@ mod tests {
         std::fs::write(dir.path().join("chain.py"), "def a():\n    b()\n\ndef b():\n    c()\n\ndef c():\n    pass\n").unwrap();
         let store = Store::open_in_memory().unwrap();
         super::super::build::build(&store, dir.path(), &CodeGraphConfig::default(), true).unwrap();
+        let project_id = pid(&store, dir.path());
 
-        let path = run(&store, &GraphQuery::Path("a".into(), "c".into())).unwrap();
+        let path = run(&store, &project_id, &GraphQuery::Path("a".into(), "c".into())).unwrap();
         let names: Vec<&str> = path.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
     }
 
     #[test]
     fn path_returns_empty_when_unreachable() {
-        let (_dir, store) = build_fixture();
-        let path = run(&store, &GraphQuery::Path("add".into(), "use_add".into())).unwrap();
+        let (_dir, store, project_id) = build_fixture();
+        let path = run(&store, &project_id, &GraphQuery::Path("add".into(), "use_add".into())).unwrap();
         assert!(path.is_empty(), "add doesn't call use_add, no forward path exists");
     }
 
     #[test]
     fn callers_of_finds_both_callers() {
-        let (_dir, store) = build_fixture();
-        let callers = run(&store, &GraphQuery::CallersOf("add".into())).unwrap();
+        let (_dir, store, project_id) = build_fixture();
+        let callers = run(&store, &project_id, &GraphQuery::CallersOf("add".into())).unwrap();
         let names: Vec<&str> = callers.iter().map(|n| n.name.as_str()).collect();
         assert!(names.contains(&"test_add"));
         assert!(names.contains(&"use_add"));
@@ -190,30 +214,74 @@ mod tests {
 
     #[test]
     fn callees_of_is_forward() {
-        let (_dir, store) = build_fixture();
-        let callees = run(&store, &GraphQuery::CalleesOf("use_add".into())).unwrap();
+        let (_dir, store, project_id) = build_fixture();
+        let callees = run(&store, &project_id, &GraphQuery::CalleesOf("use_add".into())).unwrap();
         assert_eq!(callees.len(), 1);
         assert_eq!(callees[0].name, "add");
     }
 
     #[test]
     fn tests_for_returns_test_node() {
-        let (_dir, store) = build_fixture();
-        let tests = run(&store, &GraphQuery::TestsFor("add".into())).unwrap();
+        let (_dir, store, project_id) = build_fixture();
+        let tests = run(&store, &project_id, &GraphQuery::TestsFor("add".into())).unwrap();
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].name, "test_add");
     }
 
     #[test]
+    fn subtypes_and_supertypes_of_follow_extends_edges() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.py"), "class Animal:\n    pass\n\nclass Dog(Animal):\n    pass\n").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        super::super::build::build(&store, dir.path(), &CodeGraphConfig::default(), true).unwrap();
+        let project_id = pid(&store, dir.path());
+
+        let subtypes = run(&store, &project_id, &GraphQuery::Subtypes("Animal".into())).unwrap();
+        assert_eq!(subtypes.len(), 1);
+        assert_eq!(subtypes[0].name, "Dog");
+
+        let supertypes = run(&store, &project_id, &GraphQuery::Supertypes("Dog".into())).unwrap();
+        assert_eq!(supertypes.len(), 1);
+        assert_eq!(supertypes[0].name, "Animal");
+    }
+
+    #[test]
     fn keyword_search_matches_substring() {
-        let (_dir, store) = build_fixture();
-        let results = run(&store, &GraphQuery::Keyword("add".into())).unwrap();
+        let (_dir, store, project_id) = build_fixture();
+        let results = run(&store, &project_id, &GraphQuery::Keyword("add".into())).unwrap();
         assert!(results.len() >= 2);
     }
 
     #[test]
     fn unknown_symbol_returns_empty_not_error() {
-        let (_dir, store) = build_fixture();
-        assert!(run(&store, &GraphQuery::CallersOf("nonexistent".into())).unwrap().is_empty());
+        let (_dir, store, project_id) = build_fixture();
+        assert!(run(&store, &project_id, &GraphQuery::CallersOf("nonexistent".into())).unwrap().is_empty());
+    }
+
+    #[test]
+    fn keyword_search_matches_mid_identifier_substring_via_trigram() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.py"), "def getUserById(id):\n    return id\n").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        super::super::build::build(&store, dir.path(), &CodeGraphConfig::default(), true).unwrap();
+        let project_id = pid(&store, dir.path());
+
+        // "User" is in the middle of "getUserById" — not its own token, so this
+        // only matches under the trigram tokenizer, not a word-based one.
+        let results = run(&store, &project_id, &GraphQuery::Keyword("User".into())).unwrap();
+        assert!(results.iter().any(|n| n.name == "getUserById"));
+    }
+
+    #[test]
+    fn keyword_search_short_keyword_falls_back_to_like() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.py"), "def ab():\n    pass\n").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        super::super::build::build(&store, dir.path(), &CodeGraphConfig::default(), true).unwrap();
+        let project_id = pid(&store, dir.path());
+
+        // 2-char keyword: too short for the trigram index, exercises the LIKE fallback.
+        let results = run(&store, &project_id, &GraphQuery::Keyword("ab".into())).unwrap();
+        assert!(results.iter().any(|n| n.name == "ab"));
     }
 }

@@ -6,21 +6,21 @@ use serde_json::json;
 use crate::model::{CgEdge, CgNode};
 use crate::store::Store;
 
-fn all_nodes_and_edges(store: &Store) -> Result<(Vec<CgNode>, Vec<CgEdge>)> {
+fn all_nodes_and_edges(store: &Store, project_id: &str) -> Result<(Vec<CgNode>, Vec<CgEdge>)> {
     let mut nodes = Vec::new();
-    for file in store.cg_all_files()? {
-        nodes.extend(store.cg_nodes_in_file(&file.path)?);
+    for file in store.cg_all_files(project_id)? {
+        nodes.extend(store.cg_nodes_in_file(project_id, &file.path)?);
     }
-    Ok((nodes, store.cg_all_edges()?))
+    Ok((nodes, store.cg_all_edges(project_id)?))
 }
 
-pub fn export_json(store: &Store) -> Result<String> {
-    let (nodes, edges) = all_nodes_and_edges(store)?;
+pub fn export_json(store: &Store, project_id: &str) -> Result<String> {
+    let (nodes, edges) = all_nodes_and_edges(store, project_id)?;
     Ok(serde_json::to_string_pretty(&json!({ "nodes": nodes, "edges": edges }))?)
 }
 
-pub fn export_dot(store: &Store) -> Result<String> {
-    let (nodes, edges) = all_nodes_and_edges(store)?;
+pub fn export_dot(store: &Store, project_id: &str) -> Result<String> {
+    let (nodes, edges) = all_nodes_and_edges(store, project_id)?;
     let mut out = String::from("digraph codegraph {\n");
     for n in &nodes {
         out.push_str(&format!("  \"{}\" [label=\"{}\", kind=\"{}\"];\n", dot_escape(&n.id), dot_escape(&n.name), n.kind));
@@ -32,8 +32,8 @@ pub fn export_dot(store: &Store) -> Result<String> {
     Ok(out)
 }
 
-pub fn export_graphml(store: &Store) -> Result<String> {
-    let (nodes, edges) = all_nodes_and_edges(store)?;
+pub fn export_graphml(store: &Store, project_id: &str) -> Result<String> {
+    let (nodes, edges) = all_nodes_and_edges(store, project_id)?;
     let mut out = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\">\n\
          <key id=\"node_kind\" for=\"node\" attr.name=\"kind\" attr.type=\"string\"/>\n\
@@ -75,18 +75,23 @@ mod tests {
     use crate::config::CodeGraphConfig;
     use tempfile::tempdir;
 
-    fn fixture_store() -> Store {
+    fn pid(store: &Store, dir: &std::path::Path) -> String {
+        crate::project::detect_project(store, &dir.to_string_lossy()).unwrap().id
+    }
+
+    fn fixture_store() -> (Store, String) {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "fn a() { b(); }\nfn b() {}\n").unwrap();
         let store = Store::open_in_memory().unwrap();
         super::super::build::build(&store, dir.path(), &CodeGraphConfig::default(), true).unwrap();
-        store
+        let project_id = pid(&store, dir.path());
+        (store, project_id)
     }
 
     #[test]
     fn export_json_round_trips_node_and_edge_counts() {
-        let store = fixture_store();
-        let json = export_json(&store).unwrap();
+        let (store, project_id) = fixture_store();
+        let json = export_json(&store, &project_id).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["nodes"].as_array().unwrap().len(), 2);
         assert_eq!(parsed["edges"].as_array().unwrap().len(), 1);
@@ -94,8 +99,8 @@ mod tests {
 
     #[test]
     fn export_dot_is_well_formed() {
-        let store = fixture_store();
-        let dot = export_dot(&store).unwrap();
+        let (store, project_id) = fixture_store();
+        let dot = export_dot(&store, &project_id).unwrap();
         assert!(dot.starts_with("digraph codegraph {"));
         assert!(dot.trim_end().ends_with('}'));
         assert!(dot.contains("->"));
@@ -103,8 +108,8 @@ mod tests {
 
     #[test]
     fn export_graphml_is_valid_xml_with_expected_elements() {
-        let store = fixture_store();
-        let graphml = export_graphml(&store).unwrap();
+        let (store, project_id) = fixture_store();
+        let graphml = export_graphml(&store, &project_id).unwrap();
         assert!(graphml.starts_with("<?xml"));
         assert_eq!(graphml.matches("<node ").count(), 2);
         assert_eq!(graphml.matches("<edge ").count(), 1);
@@ -117,8 +122,9 @@ mod tests {
         std::fs::write(dir.path().join("a.py"), "import os\n").unwrap();
         let store = Store::open_in_memory().unwrap();
         super::super::build::build(&store, dir.path(), &CodeGraphConfig::default(), true).unwrap();
+        let project_id = pid(&store, dir.path());
         // The import node's name is the raw "import os" text — exercise XML/DOT escaping paths.
-        let _ = export_dot(&store).unwrap();
-        let _ = export_graphml(&store).unwrap();
+        let _ = export_dot(&store, &project_id).unwrap();
+        let _ = export_graphml(&store, &project_id).unwrap();
     }
 }

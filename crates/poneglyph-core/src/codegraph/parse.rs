@@ -21,6 +21,9 @@ pub struct ParsedFile {
     /// language's naming convention makes the guess reliable (python
     /// `test_x` → `x`, go `TestX` → `X`); empty guess means "skip".
     pub tests: Vec<(String, Option<String>)>,
+    /// (subtype_name, supertype_name) — class extends/interface implements/
+    /// Rust trait impl, name-based like `calls`/`tests`, resolved in pass 2.
+    pub inherits: Vec<(String, String)>,
 }
 
 struct LangSpec {
@@ -28,6 +31,12 @@ struct LangSpec {
     type_kinds: &'static [&'static str],
     import_kinds: &'static [&'static str],
     call_kinds: &'static [&'static str],
+    /// Node kinds (children of a `type_kinds` node) that hold extends/
+    /// implements/superclass identifiers — scanned generically for
+    /// identifier-like descendant tokens. Languages whose heritage clause is
+    /// better reached via a named field (python's `superclasses`, scala's
+    /// `extend`) leave this empty and are special-cased in `walk()` instead.
+    heritage_kinds: &'static [&'static str],
 }
 
 /// One row per supported language — the single source of truth for
@@ -98,6 +107,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["struct_item", "enum_item", "trait_item"],
             import_kinds: &["use_declaration"],
             call_kinds: &["call_expression", "macro_invocation"],
+            heritage_kinds: &[], // no classical inheritance — `impl_item` trait impls are special-cased in walk()
         },
     },
     LangEntry {
@@ -109,6 +119,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["class_declaration", "interface_declaration"],
             import_kinds: &["import_statement"],
             call_kinds: &["call_expression"],
+            heritage_kinds: &["class_heritage", "extends_type_clause"],
         },
     },
     LangEntry {
@@ -120,6 +131,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["class_declaration", "interface_declaration"],
             import_kinds: &["import_statement"],
             call_kinds: &["call_expression"],
+            heritage_kinds: &["class_heritage"],
         },
     },
     LangEntry {
@@ -131,6 +143,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["class_definition"],
             import_kinds: &["import_statement", "import_from_statement"],
             call_kinds: &["call"],
+            heritage_kinds: &[], // reached via the `superclasses` field, special-cased in walk()
         },
     },
     LangEntry {
@@ -142,6 +155,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["type_spec"],
             import_kinds: &["import_declaration"],
             call_kinds: &["call_expression"],
+            heritage_kinds: &[], // no inheritance concept
         },
     },
     LangEntry {
@@ -153,6 +167,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["struct_specifier", "enum_specifier", "type_definition"],
             import_kinds: &["preproc_include"],
             call_kinds: &["call_expression"],
+            heritage_kinds: &[], // no inheritance concept
         },
     },
     LangEntry {
@@ -164,6 +179,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["struct_specifier", "enum_specifier", "class_specifier", "type_definition"],
             import_kinds: &["preproc_include", "using_declaration"],
             call_kinds: &["call_expression"],
+            heritage_kinds: &["base_class_clause"],
         },
     },
     LangEntry {
@@ -175,6 +191,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["class_declaration", "interface_declaration", "enum_declaration"],
             import_kinds: &["import_declaration"],
             call_kinds: &["method_invocation", "object_creation_expression"],
+            heritage_kinds: &["superclass", "super_interfaces", "extends_interfaces"],
         },
     },
     LangEntry {
@@ -186,6 +203,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["class_declaration", "interface_declaration", "struct_declaration", "enum_declaration"],
             import_kinds: &["using_directive"],
             call_kinds: &["invocation_expression", "object_creation_expression"],
+            heritage_kinds: &["base_list"],
         },
     },
     LangEntry {
@@ -197,6 +215,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["class_declaration", "interface_declaration", "enum_declaration"],
             import_kinds: &["namespace_use_declaration"],
             call_kinds: &["function_call_expression", "member_call_expression"],
+            heritage_kinds: &["base_clause", "class_interface_clause"],
         },
     },
     LangEntry {
@@ -208,6 +227,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["class", "module"],
             import_kinds: &["call"],  // require/require_relative are calls
             call_kinds: &["call", "method_call"],
+            heritage_kinds: &["superclass"],
         },
     },
     LangEntry {
@@ -219,6 +239,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["class_declaration", "interface_declaration", "object_declaration", "enum_declaration"],
             import_kinds: &["import_header"],
             call_kinds: &["call_expression"],
+            heritage_kinds: &["delegation_specifiers"],
         },
     },
     LangEntry {
@@ -230,6 +251,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["class_declaration", "struct_declaration", "protocol_declaration", "enum_declaration"],
             import_kinds: &["import_declaration"],
             call_kinds: &["call_expression"],
+            heritage_kinds: &["inheritance_specifier"],
         },
     },
     LangEntry {
@@ -241,6 +263,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &[],
             import_kinds: &[],
             call_kinds: &["command_name"],
+            heritage_kinds: &[],
         },
     },
     LangEntry {
@@ -252,6 +275,7 @@ static LANGS: &[LangEntry] = &[
             type_kinds: &["class_definition", "trait_definition", "object_definition"],
             import_kinds: &["import_declaration"],
             call_kinds: &["call_expression"],
+            heritage_kinds: &[], // reached via the `extend` field, special-cased in walk()
         },
     },
 ];
@@ -280,7 +304,7 @@ pub fn parse_file(path: &str, language: &str, source: &str) -> Result<ParsedFile
     parser.set_language(&ts_lang).map_err(|e| anyhow::anyhow!("failed to load {language} grammar: {e}"))?;
     let tree = parser.parse(source, None).ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse {path}"))?;
 
-    let mut out = ParsedFile { nodes: Vec::new(), calls: Vec::new(), tests: Vec::new() };
+    let mut out = ParsedFile { nodes: Vec::new(), calls: Vec::new(), tests: Vec::new(), inherits: Vec::new() };
     let mut fn_stack: Vec<String> = Vec::new();
     walk(tree.root_node(), source, path, language, spec, &mut out, &mut fn_stack);
     Ok(out)
@@ -347,9 +371,70 @@ fn is_rust_test_fn(n: Node, source: &str) -> bool {
     n.prev_sibling().is_some_and(|sib| sib.kind() == "attribute_item" && text(sib, source).contains("test"))
 }
 
+/// Leaf token kinds that hold a type/superclass/interface name across the
+/// grammars in `LANGS` — wider than `identifier`/`type_identifier` because
+/// several languages name these tokens differently: Ruby's `constant`,
+/// PHP's `name`/`qualified_name`/`relative_name`, C++'s `qualified_identifier`/
+/// `template_type`, Swift's `user_type`, Scala's `stable_type_identifier`.
+const HERITAGE_TOKEN_KINDS: &[&str] = &[
+    "identifier",
+    "type_identifier",
+    "constant",
+    "name",
+    "qualified_name",
+    "relative_name",
+    "qualified_identifier",
+    "template_type",
+    "user_type",
+    "stable_type_identifier",
+];
+
+/// All extends/implements/superclass names found anywhere under `n` (a
+/// heritage clause node, or a single type-reference field for Rust's
+/// `impl Trait for Type`). Stops descending once a heritage-token kind
+/// matches — those are leaves in practice — so generic wrappers like
+/// `generic_type`/`scoped_type_identifier` are transparently descended into.
+fn heritage_names(n: Node, source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_heritage_names(n, source, &mut out);
+    out
+}
+
+fn collect_heritage_names(n: Node, source: &str, out: &mut Vec<String>) {
+    if HERITAGE_TOKEN_KINDS.contains(&n.kind()) {
+        if n.kind() == "user_type" {
+            // Swift: prefer the inner type_identifier so `Foo<T>` reports "Foo", not the whole text.
+            let mut cursor = n.walk();
+            if let Some(inner) = n.children(&mut cursor).find(|c| c.kind() == "type_identifier") {
+                out.push(text(inner, source).to_string());
+                return;
+            }
+        }
+        out.push(text(n, source).to_string());
+        return;
+    }
+    let mut cursor = n.walk();
+    for child in n.children(&mut cursor) {
+        collect_heritage_names(child, source, out);
+    }
+}
+
 fn walk(n: Node, source: &str, path: &str, language: &str, spec: &LangSpec, out: &mut ParsedFile, fn_stack: &mut Vec<String>) {
     let kind = n.kind();
     let mut pushed = false;
+
+    // Rust has no classical inheritance — `impl Trait for Type` is the
+    // closest analogue, and doesn't fit the type_kinds/heritage_kinds shape
+    // below (the trait impl isn't itself a Type node), so it's handled here
+    // independently of the function/type/import/call dispatch chain.
+    if language == "rust" && kind == "impl_item" {
+        if let (Some(ty), Some(tr)) = (n.child_by_field_name("type"), n.child_by_field_name("trait")) {
+            if let (Some(sub), Some(sup)) = (heritage_names(ty, source).into_iter().next(), heritage_names(tr, source).into_iter().next())
+            {
+                out.inherits.push((sub, sup));
+            }
+        }
+    }
 
     if spec.function_kinds.contains(&kind) {
         if let Some(name_node) = n.child_by_field_name("name") {
@@ -387,7 +472,25 @@ fn walk(n: Node, source: &str, path: &str, language: &str, spec: &LangSpec, out:
         // Go's type_spec covers aliases/interfaces too; only struct types count as a "type" node here.
         let qualifies = kind != "type_spec" || n.child_by_field_name("type").is_some_and(|t| t.kind() == "struct_type");
         if qualifies && let Some(name_node) = n.child_by_field_name("name") {
-            out.nodes.push(make_node(path, CgNodeKind::Type, text(name_node, source), n));
+            let type_name = text(name_node, source).to_string();
+            out.nodes.push(make_node(path, CgNodeKind::Type, &type_name, n));
+
+            let mut cursor = n.walk();
+            for child in n.children(&mut cursor) {
+                if spec.heritage_kinds.contains(&child.kind()) {
+                    out.inherits.extend(heritage_names(child, source).into_iter().map(|sup| (type_name.clone(), sup)));
+                }
+            }
+            // python/scala reach their heritage clause via a named field rather than a
+            // child-kind lookup, since their grammars don't wrap it in its own node kind.
+            let field_heritage = match language {
+                "python" => n.child_by_field_name("superclasses"),
+                "scala" => n.child_by_field_name("extend"),
+                _ => None,
+            };
+            if let Some(field) = field_heritage {
+                out.inherits.extend(heritage_names(field, source).into_iter().map(|sup| (type_name.clone(), sup)));
+            }
         }
     } else if spec.import_kinds.contains(&kind) {
         let raw = text(n, source);
@@ -501,6 +604,66 @@ fn test_helper() {
     #[test]
     fn unsupported_language_errors() {
         assert!(parse_file("x.lua", "lua", "print('hi')").is_err());
+    }
+
+    #[test]
+    fn parses_rust_trait_impl_as_inherits() {
+        let src = "trait Greet {}\nstruct Foo;\nimpl Greet for Foo {}\n";
+        let parsed = parse_file("fixture.rs", "rust", src).unwrap();
+        assert_eq!(parsed.inherits, vec![("Foo".to_string(), "Greet".to_string())]);
+    }
+
+    #[test]
+    fn parses_typescript_extends_and_implements() {
+        let src = "interface Shape {}\nclass Box implements Shape {}\nclass Square extends Box {}\n";
+        let parsed = parse_file("fixture.ts", "typescript", src).unwrap();
+        assert!(parsed.inherits.contains(&("Box".to_string(), "Shape".to_string())));
+        assert!(parsed.inherits.contains(&("Square".to_string(), "Box".to_string())));
+    }
+
+    #[test]
+    fn parses_python_superclasses() {
+        let src = "class Animal:\n    pass\n\nclass Dog(Animal):\n    pass\n";
+        let parsed = parse_file("fixture.py", "python", src).unwrap();
+        assert_eq!(parsed.inherits, vec![("Dog".to_string(), "Animal".to_string())]);
+    }
+
+    #[test]
+    fn parses_java_superclass_and_interfaces() {
+        let src = "interface Flyable {}\ninterface Swimmable {}\nclass Duck extends Animal implements Flyable, Swimmable {}\n";
+        let parsed = parse_file("fixture.java", "java", src).unwrap();
+        assert!(parsed.inherits.contains(&("Duck".to_string(), "Animal".to_string())));
+        assert!(parsed.inherits.contains(&("Duck".to_string(), "Flyable".to_string())));
+        assert!(parsed.inherits.contains(&("Duck".to_string(), "Swimmable".to_string())));
+    }
+
+    #[test]
+    fn parses_ruby_superclass() {
+        let src = "class Animal\nend\n\nclass Dog < Animal\nend\n";
+        let parsed = parse_file("fixture.rb", "ruby", src).unwrap();
+        assert_eq!(parsed.inherits, vec![("Dog".to_string(), "Animal".to_string())]);
+    }
+
+    #[test]
+    fn parses_cpp_base_class_clause() {
+        let src = "class Animal {};\nclass Dog : public Animal {};\n";
+        let parsed = parse_file("fixture.cpp", "cpp", src).unwrap();
+        assert_eq!(parsed.inherits, vec![("Dog".to_string(), "Animal".to_string())]);
+    }
+
+    #[test]
+    fn parses_swift_inheritance_specifier() {
+        let src = "protocol Greetable {}\nclass Dog: Greetable {}\n";
+        let parsed = parse_file("fixture.swift", "swift", src).unwrap();
+        assert_eq!(parsed.inherits, vec![("Dog".to_string(), "Greetable".to_string())]);
+    }
+
+    #[test]
+    fn parses_php_base_and_interface_clauses() {
+        let src = "<?php\ninterface Flyable {}\nclass Animal {}\nclass Duck extends Animal implements Flyable {}\n";
+        let parsed = parse_file("fixture.php", "php", src).unwrap();
+        assert!(parsed.inherits.contains(&("Duck".to_string(), "Animal".to_string())));
+        assert!(parsed.inherits.contains(&("Duck".to_string(), "Flyable".to_string())));
     }
 
     #[test]

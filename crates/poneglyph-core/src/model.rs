@@ -349,6 +349,12 @@ pub enum CgEdgeKind {
     Calls,
     Imports,
     Tests,
+    /// Class extends/interface implements/Rust trait impl — unified into one
+    /// kind, same rationale as `CgNodeKind::Type` unifying class/struct/
+    /// interface/trait: callers care about the relationship, not which
+    /// language keyword produced it. Points from concrete to abstract
+    /// (implementor -> base/interface/trait).
+    Extends,
 }
 
 impl std::fmt::Display for CgEdgeKind {
@@ -357,6 +363,7 @@ impl std::fmt::Display for CgEdgeKind {
             Self::Calls => "calls",
             Self::Imports => "imports",
             Self::Tests => "tests",
+            Self::Extends => "extends",
         };
         write!(f, "{s}")
     }
@@ -369,6 +376,7 @@ impl std::str::FromStr for CgEdgeKind {
             "calls" => Ok(Self::Calls),
             "imports" => Ok(Self::Imports),
             "tests" => Ok(Self::Tests),
+            "extends" => Ok(Self::Extends),
             _ => Err(anyhow::anyhow!("unknown cg_edge kind: {s}")),
         }
     }

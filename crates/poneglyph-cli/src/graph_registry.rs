@@ -63,6 +63,17 @@ pub fn register(dir: &Path, id: &str) -> Result<()> {
     save(&projects)
 }
 
+/// Remove the entry for `dir` if present. No-op if not found.
+pub fn unregister(dir: &str) -> Result<()> {
+    let mut projects = load()?;
+    let before = projects.project.len();
+    projects.project.retain(|p| p.dir != dir);
+    if projects.project.len() != before {
+        save(&projects)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

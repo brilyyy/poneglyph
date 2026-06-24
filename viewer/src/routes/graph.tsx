@@ -32,8 +32,11 @@ export const Route = createFileRoute("/graph")({
 // less-relevant memories instead of dropping the data entirely.
 const TIER_OPACITY: Record<Memory["tier"], number> = { hot: 1, warm: 0.75, cold: 0.45 };
 
+const LIMIT_DEBOUNCE_MS = 300;
+
 function GraphPage() {
   const { focus } = Route.useSearch();
+  const [limitInput, setLimitInput] = useState(500);
   const [limit, setLimit] = useState(500);
   const [memories, setMemories] = useState<Map<string, Memory>>(new Map());
   const [edges, setEdges] = useState<Map<string, Edge>>(new Map());
@@ -55,6 +58,13 @@ function GraphPage() {
     setEdges(new Map(initial.data.edges.map((e) => [e.id, e])));
     setSelected(null);
   }, [initial.data]);
+
+  // Slider tracks the drag instantly; the query-triggering value lags so
+  // dragging doesn't fire a refetch + GPU rebuild + camera fit per tick.
+  useEffect(() => {
+    const t = setTimeout(() => setLimit(limitInput), LIMIT_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [limitInput]);
 
   const merge = useCallback((nodes: Memory[], newEdges: Edge[]) => {
     setMemories((prev) => {
@@ -199,14 +209,14 @@ function GraphPage() {
           ))}
         </div>
         <label className="flex items-center gap-2 border-l border-border pl-4 text-muted-foreground">
-          render limit: {limit}
+          render limit: {limitInput}
           <input
             type="range"
             min={100}
             max={Math.max(2000, totalNodes)}
             step={100}
-            value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
+            value={limitInput}
+            onChange={(e) => setLimitInput(Number(e.target.value))}
             className="w-40 accent-primary"
           />
         </label>

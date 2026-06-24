@@ -257,6 +257,8 @@ pub async fn graph(
 
 #[derive(Deserialize)]
 pub struct CodegraphQuery {
+    /// Absolute path of the `graph init`'d project to browse.
+    pub project_path: String,
     /// File path (relative to the graph root) or symbol name to center on.
     pub focus: Option<String>,
     pub depth: Option<usize>,
@@ -270,6 +272,8 @@ pub struct CodegraphResponse {
     /// True node/edge counts in the code graph, regardless of `limit`.
     pub total_nodes: i64,
     pub total_edges: i64,
+    /// True if a file change is still awaiting a debounced graph rebuild.
+    pub stale: bool,
 }
 
 pub async fn codegraph_graph(
@@ -277,35 +281,91 @@ pub async fn codegraph_graph(
     Query(q): Query<CodegraphQuery>,
 ) -> ApiResult<CodegraphResponse> {
     let store = state.lock_store()?;
+    let project = poneglyph_core::project::detect_project(&store, &q.project_path)?;
 
     let (nodes, edges) = match q.focus.as_deref() {
         Some(focus) => {
             let depth = q.depth.unwrap_or(state.config.graph.blast_radius_depth).clamp(1, 10);
-            let report = codegraph::blast_radius(&store, focus, depth)?;
+            let report = codegraph::blast_radius(&store, &project.id, focus, depth)?;
             let mut nodes = report.root;
             nodes.extend(report.dependents.into_iter().map(|d| d.node));
             nodes.extend(report.tests);
             let id_vec: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
-            let edges = store.cg_edges_for_nodes(&id_vec)?;
+            let edges = store.cg_edges_for_nodes(&project.id, &id_vec)?;
             (nodes, edges)
         }
         None => {
             let limit = q.limit.unwrap_or(500).clamp(1, state.config.graph.max_render_nodes);
-            let nodes = store.cg_all_nodes(Some(limit))?;
+            let nodes = store.cg_all_nodes(&project.id, Some(limit))?;
             let id_vec: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
-            let edges = store.cg_edges_for_nodes(&id_vec)?;
+            let edges = store.cg_edges_for_nodes(&project.id, &id_vec)?;
             (nodes, edges)
         }
     };
 
-    let (_files, total_nodes, total_edges) = store.cg_stats()?;
-    Ok(Json(CodegraphResponse { nodes, edges, total_nodes, total_edges }))
+    let (_files, total_nodes, total_edges) = store.cg_stats(&project.id)?;
+    let stale = state.is_graph_dirty(&project.id);
+    Ok(Json(CodegraphResponse { nodes, edges, total_nodes, total_edges, stale }))
 }
 
-pub async fn codegraph_stats(State(state): State<AppState>) -> ApiResult<Value> {
+#[derive(Deserialize)]
+pub struct CodegraphStatsQuery {
+    pub project_path: String,
+}
+
+pub async fn codegraph_stats(
+    State(state): State<AppState>,
+    Query(q): Query<CodegraphStatsQuery>,
+) -> ApiResult<Value> {
     let store = state.lock_store()?;
-    let (files, nodes, edges) = store.cg_stats()?;
-    Ok(Json(json!({ "files": files, "nodes": nodes, "edges": edges })))
+    let project = poneglyph_core::project::detect_project(&store, &q.project_path)?;
+    let (files, nodes, edges) = store.cg_stats(&project.id)?;
+    let stale = state.is_graph_dirty(&project.id);
+    Ok(Json(json!({ "files": files, "nodes": nodes, "edges": edges, "stale": stale })))
+}
+
+#[derive(Deserialize)]
+pub struct CodegraphExploreQuery {
+    pub project_path: String,
+    /// File path (relative to the graph root) or symbol name to explore.
+    pub target: String,
+    pub depth: Option<usize>,
+}
+
+/// Everything about a symbol in one call: source snippet, direct
+/// callers/callees, supertypes/subtypes, covering tests, and the bounded
+/// blast radius. Mirrors the `codegraph_explore` MCP tool.
+pub async fn codegraph_explore(
+    State(state): State<AppState>,
+    Query(q): Query<CodegraphExploreQuery>,
+) -> ApiResult<Value> {
+    let store = state.lock_store()?;
+    let project = poneglyph_core::project::detect_project(&store, &q.project_path)?;
+    let depth = q.depth.unwrap_or(state.config.graph.blast_radius_depth).clamp(1, 10);
+    let report = codegraph::explore(&store, &project.id, std::path::Path::new(&project.path), &q.target, depth)?;
+    let mut body = serde_json::to_value(report).map_err(ApiError::internal)?;
+    body["stale"] = json!(state.is_graph_dirty(&project.id));
+    Ok(Json(body))
+}
+
+#[derive(Deserialize)]
+pub struct CodegraphSearchQuery {
+    pub project_path: String,
+    /// Bare keyword (substring search) or a prefixed query like
+    /// `callers_of:<name>`, `path:<from>..<to>`, etc.
+    pub q: String,
+}
+
+pub async fn codegraph_search(
+    State(state): State<AppState>,
+    Query(q): Query<CodegraphSearchQuery>,
+) -> ApiResult<Value> {
+    let store = state.lock_store()?;
+    let project = poneglyph_core::project::detect_project(&store, &q.project_path)?;
+    let query = codegraph::parse_query(&q.q);
+    let results = codegraph::run_query(&store, &project.id, &query)?;
+    let stale = state.is_graph_dirty(&project.id);
+    Ok(Json(json!({ "results": results, "stale": stale })))
 }
 
 // ---------------------------------------------------------------------------

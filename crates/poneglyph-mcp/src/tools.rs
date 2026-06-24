@@ -94,8 +94,11 @@ pub struct ListMemoriesRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CodegraphQueryRequest {
     /// `callers_of:<name>`, `callees_of:<name>`, `imports_of:<name>`,
-    /// `tests_for:<name>`, or a bare keyword.
+    /// `tests_for:<name>`, `subtypes_of:<name>`, `supertypes_of:<name>`, or a
+    /// bare keyword.
     pub query: String,
+    /// Absolute path of the `graph init`'d project to query.
+    pub project_path: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -104,6 +107,18 @@ pub struct CodegraphBlastRadiusRequest {
     pub target: String,
     /// Max traversal depth (defaults to `[graph].blast_radius_depth`).
     pub depth: Option<usize>,
+    /// Absolute path of the `graph init`'d project to query.
+    pub project_path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CodegraphExploreRequest {
+    /// File path (relative to the graph root) or symbol name.
+    pub target: String,
+    /// Max traversal depth (defaults to `[graph].blast_radius_depth`).
+    pub depth: Option<usize>,
+    /// Absolute path of the `graph init`'d project to query.
+    pub project_path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +211,10 @@ impl From<&CgNode> for CodegraphNodeView {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CodegraphQueryResponse {
     pub results: Vec<CodegraphNodeView>,
+    /// True if a file in this project changed since the last index refresh
+    /// and a rebuild is still pending (debounced) — results may be slightly
+    /// behind; `Read` the specific file directly if exact lines matter.
+    pub stale: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -209,6 +228,47 @@ pub struct CodegraphBlastRadiusResponse {
     pub root: Vec<CodegraphNodeView>,
     pub dependents: Vec<CodegraphDependentView>,
     pub tests: Vec<CodegraphNodeView>,
+    /// True if a file in this project changed since the last index refresh
+    /// and a rebuild is still pending (debounced) — results may be slightly
+    /// behind; `Read` the specific file directly if exact lines matter.
+    pub stale: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodegraphSnippetView {
+    pub node_id: String,
+    pub file_path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub source: String,
+}
+
+impl From<&codegraph::Snippet> for CodegraphSnippetView {
+    fn from(s: &codegraph::Snippet) -> Self {
+        Self {
+            node_id: s.node_id.clone(),
+            file_path: s.file_path.clone(),
+            start_line: s.start_line,
+            end_line: s.end_line,
+            source: s.source.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodegraphExploreResponse {
+    pub root: Vec<CodegraphNodeView>,
+    pub snippets: Vec<CodegraphSnippetView>,
+    pub callers: Vec<CodegraphNodeView>,
+    pub callees: Vec<CodegraphNodeView>,
+    pub supertypes: Vec<CodegraphNodeView>,
+    pub subtypes: Vec<CodegraphNodeView>,
+    pub tests: Vec<CodegraphNodeView>,
+    pub dependents: Vec<CodegraphDependentView>,
+    /// True if a file in this project changed since the last index refresh
+    /// and a rebuild is still pending (debounced) — results may be slightly
+    /// behind; `Read` the specific file directly if exact lines matter.
+    pub stale: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +286,10 @@ pub struct PoneglyphMcp {
     /// Wake-up handle for the background edge worker; edge jobs are still
     /// enqueued without it and drained on the next worker poll.
     enrich: Option<EnrichHandle>,
+    /// Project ids with a file change pending a debounced graph rebuild —
+    /// `None` outside the daemon (e.g. tests), where freshness is never
+    /// tracked and codegraph responses are never flagged stale.
+    graph_dirty: Option<Arc<Mutex<std::collections::HashSet<String>>>>,
 }
 
 fn internal(e: impl std::fmt::Display) -> ErrorData {
@@ -239,12 +303,21 @@ fn not_found(msg: impl Into<String>) -> ErrorData {
 
 impl PoneglyphMcp {
     pub fn new(store: Arc<Mutex<Store>>, embedder: Option<Arc<Embedder>>, config: Arc<Config>) -> Self {
-        Self { store, embedder, config, enrich: None }
+        Self { store, embedder, config, enrich: None, graph_dirty: None }
     }
 
     pub fn with_enrich(mut self, handle: EnrichHandle) -> Self {
         self.enrich = Some(handle);
         self
+    }
+
+    pub fn with_graph_dirty(mut self, dirty: Arc<Mutex<std::collections::HashSet<String>>>) -> Self {
+        self.graph_dirty = Some(dirty);
+        self
+    }
+
+    fn is_graph_dirty(&self, project_id: &str) -> bool {
+        self.graph_dirty.as_ref().is_some_and(|d| d.lock().is_ok_and(|d| d.contains(project_id)))
     }
 
     fn lock_store(&self) -> Result<std::sync::MutexGuard<'_, Store>, ErrorData> {
@@ -487,25 +560,30 @@ impl PoneglyphMcp {
         }))
     }
 
-    #[tool(description = "Query the code knowledge graph: callers_of:<name>, callees_of:<name>, imports_of:<name>, tests_for:<name>, path:<from>..<to> (shortest call/import chain between two symbols), or a bare keyword search. Requires `poneglyph graph init` to have been run.")]
+    #[tool(description = "Query the code knowledge graph: callers_of:<name>, callees_of:<name>, imports_of:<name>, tests_for:<name>, subtypes_of:<name> (who extends/implements this), supertypes_of:<name> (what this extends/implements), path:<from>..<to> (shortest call/import chain between two symbols), or a bare keyword search. Requires `poneglyph graph init` to have been run on `project_path`. `stale: true` in the response means a file changed since the last index refresh and a rebuild is still pending — re-`Read` the specific file if exact line numbers matter.")]
     pub async fn codegraph_query(
         &self,
         Parameters(req): Parameters<CodegraphQueryRequest>,
     ) -> Result<Json<CodegraphQueryResponse>, ErrorData> {
         let store = self.lock_store()?;
+        let project = poneglyph_core::project::detect_project(&store, &req.project_path).map_err(internal)?;
         let query = codegraph::parse_query(&req.query);
-        let results = codegraph::run_query(&store, &query).map_err(internal)?;
-        Ok(Json(CodegraphQueryResponse { results: results.iter().map(CodegraphNodeView::from).collect() }))
+        let results = codegraph::run_query(&store, &project.id, &query).map_err(internal)?;
+        Ok(Json(CodegraphQueryResponse {
+            results: results.iter().map(CodegraphNodeView::from).collect(),
+            stale: self.is_graph_dirty(&project.id),
+        }))
     }
 
-    #[tool(description = "Recursive caller/importer/test trace from a file or symbol in the code knowledge graph — what breaks if this changes. Requires `poneglyph graph init` to have been run.")]
+    #[tool(description = "Recursive caller/importer/test trace from a file or symbol in the code knowledge graph — what breaks if this changes. Requires `poneglyph graph init` to have been run on `project_path`. `stale: true` in the response means a rebuild is pending — re-`Read` the specific file if exact line numbers matter.")]
     pub async fn codegraph_blast_radius(
         &self,
         Parameters(req): Parameters<CodegraphBlastRadiusRequest>,
     ) -> Result<Json<CodegraphBlastRadiusResponse>, ErrorData> {
         let depth = req.depth.unwrap_or(self.config.graph.blast_radius_depth);
         let store = self.lock_store()?;
-        let report = codegraph::blast_radius(&store, &req.target, depth).map_err(internal)?;
+        let project = poneglyph_core::project::detect_project(&store, &req.project_path).map_err(internal)?;
+        let report = codegraph::blast_radius(&store, &project.id, &req.target, depth).map_err(internal)?;
         Ok(Json(CodegraphBlastRadiusResponse {
             root: report.root.iter().map(CodegraphNodeView::from).collect(),
             dependents: report
@@ -514,6 +592,35 @@ impl PoneglyphMcp {
                 .map(|d| CodegraphDependentView { node: CodegraphNodeView::from(&d.node), depth: d.depth })
                 .collect(),
             tests: report.tests.iter().map(CodegraphNodeView::from).collect(),
+            stale: self.is_graph_dirty(&project.id),
+        }))
+    }
+
+    #[tool(description = "Everything about a symbol in one call: source snippet, direct callers/callees, supertypes/subtypes, covering tests, and the bounded blast radius — replaces a codegraph_query + codegraph_blast_radius + manual Read round trip. Requires `poneglyph graph init` to have been run on `project_path`. `stale: true` in the response means a rebuild is pending — re-`Read` the specific file if exact line numbers matter.")]
+    pub async fn codegraph_explore(
+        &self,
+        Parameters(req): Parameters<CodegraphExploreRequest>,
+    ) -> Result<Json<CodegraphExploreResponse>, ErrorData> {
+        let depth = req.depth.unwrap_or(self.config.graph.blast_radius_depth);
+        let store = self.lock_store()?;
+        let project = poneglyph_core::project::detect_project(&store, &req.project_path).map_err(internal)?;
+        let report =
+            codegraph::explore(&store, &project.id, std::path::Path::new(&project.path), &req.target, depth).map_err(internal)?;
+        Ok(Json(CodegraphExploreResponse {
+            root: report.root.iter().map(CodegraphNodeView::from).collect(),
+            snippets: report.snippets.iter().map(CodegraphSnippetView::from).collect(),
+            callers: report.callers.iter().map(CodegraphNodeView::from).collect(),
+            callees: report.callees.iter().map(CodegraphNodeView::from).collect(),
+            supertypes: report.supertypes.iter().map(CodegraphNodeView::from).collect(),
+            subtypes: report.subtypes.iter().map(CodegraphNodeView::from).collect(),
+            tests: report.tests.iter().map(CodegraphNodeView::from).collect(),
+            dependents: report
+                .blast_radius
+                .dependents
+                .iter()
+                .map(|d| CodegraphDependentView { node: CodegraphNodeView::from(&d.node), depth: d.depth })
+                .collect(),
+            stale: self.is_graph_dirty(&project.id),
         }))
     }
 }
@@ -530,11 +637,33 @@ impl ServerHandler for PoneglyphMcp {
              For any \"find/explore/what relates to X\" question about code, call `codegraph_query` \
              FIRST — even a bare keyword (no prefix) runs a graph-backed name search, faster and \
              cheaper than scanning directories file-by-file on a large codebase. Use \
-             callers_of:/callees_of:/imports_of:/tests_for:/path:<a>..<b> for structural questions \
+             callers_of:/callees_of:/imports_of:/tests_for:/subtypes_of:/supertypes_of:/path:<a>..<b> for structural questions \
              and `codegraph_blast_radius` for impact analysis. Only fall back to grep/glob when the \
              graph returns nothing. Requires `poneglyph graph init` to have been run once."
                 .into(),
         );
         info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_graph_dirty_reflects_the_shared_set() {
+        let mcp = PoneglyphMcp::new(Arc::new(Mutex::new(Store::open_in_memory().unwrap())), None, Arc::new(Config::default()));
+        assert!(!mcp.is_graph_dirty("p1"), "no dirty set attached ⇒ never stale");
+
+        let dirty = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let mcp = mcp.with_graph_dirty(dirty.clone());
+        assert!(!mcp.is_graph_dirty("p1"));
+
+        dirty.lock().unwrap().insert("p1".to_string());
+        assert!(mcp.is_graph_dirty("p1"));
+        assert!(!mcp.is_graph_dirty("p2"), "dirty flag is per-project");
+
+        dirty.lock().unwrap().remove("p1");
+        assert!(!mcp.is_graph_dirty("p1"), "cleared after rebuild");
     }
 }

@@ -24,6 +24,7 @@ fn test_state(config: Config) -> (AppState, Arc<Mutex<Store>>) {
         embedder: None,
         config: Arc::new(config),
         enrich: None,
+        graph_dirty: None,
     };
     (state, store)
 }
@@ -657,14 +658,18 @@ async fn ingest_hoists_session_id_to_top_level() {
 // /api/codegraph, /api/codegraph/stats
 // ---------------------------------------------------------------------------
 
+const CODEGRAPH_TEST_PROJECT: &str = "/test/project";
+
 fn seed_codegraph(store: &Store) {
     use poneglyph_core::model::{CgEdge, CgEdgeKind, CgFile, CgNode, CgNodeKind};
-    store.cg_upsert_file(&CgFile { path: "a.rs".into(), language: "rust".into(), content_hash: "h1".into() }).unwrap();
+    let project = store.upsert_project(CODEGRAPH_TEST_PROJECT, "project", None).unwrap();
+    let pid = project.id.as_str();
+    store.cg_upsert_file(pid, &CgFile { path: "a.rs".into(), language: "rust".into(), content_hash: "h1".into() }).unwrap();
     let caller = CgNode { id: "a.rs#1:caller".into(), file_path: "a.rs".into(), kind: CgNodeKind::Function, name: "caller".into(), start_line: 1, end_line: 1 };
     let callee = CgNode { id: "a.rs#2:callee".into(), file_path: "a.rs".into(), kind: CgNodeKind::Function, name: "callee".into(), start_line: 2, end_line: 2 };
-    store.cg_insert_node(&caller).unwrap();
-    store.cg_insert_node(&callee).unwrap();
-    store.cg_insert_edge(&CgEdge { src_id: caller.id, dst_id: callee.id, kind: CgEdgeKind::Calls }).unwrap();
+    store.cg_insert_node(pid, &caller).unwrap();
+    store.cg_insert_node(pid, &callee).unwrap();
+    store.cg_insert_edge(pid, &CgEdge { src_id: caller.id, dst_id: callee.id, kind: CgEdgeKind::Calls }).unwrap();
 }
 
 #[tokio::test]
@@ -673,7 +678,7 @@ async fn codegraph_endpoint_returns_full_graph_with_no_focus() {
     seed_codegraph(&store.lock().unwrap());
     let router = build_router(state);
 
-    let (status, body) = send(router, get("/api/codegraph")).await;
+    let (status, body) = send(router, get(&format!("/api/codegraph?project_path={CODEGRAPH_TEST_PROJECT}"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["nodes"].as_array().unwrap().len(), 2);
     assert_eq!(body["edges"].as_array().unwrap().len(), 1);
@@ -685,7 +690,7 @@ async fn codegraph_endpoint_limit_caps_node_count() {
     seed_codegraph(&store.lock().unwrap());
     let router = build_router(state);
 
-    let (status, body) = send(router, get("/api/codegraph?limit=1")).await;
+    let (status, body) = send(router, get(&format!("/api/codegraph?project_path={CODEGRAPH_TEST_PROJECT}&limit=1"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["nodes"].as_array().unwrap().len(), 1);
     // No edges since the capped single node can't have both endpoints in view.
@@ -698,7 +703,8 @@ async fn codegraph_endpoint_focus_returns_blast_radius_subset() {
     seed_codegraph(&store.lock().unwrap());
     let router = build_router(state);
 
-    let (status, body) = send(router, get("/api/codegraph?focus=callee&depth=2")).await;
+    let (status, body) =
+        send(router, get(&format!("/api/codegraph?project_path={CODEGRAPH_TEST_PROJECT}&focus=callee&depth=2"))).await;
     assert_eq!(status, StatusCode::OK);
     let names: Vec<&str> = body["nodes"].as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"callee"));
@@ -711,11 +717,65 @@ async fn codegraph_stats_reports_counts() {
     seed_codegraph(&store.lock().unwrap());
     let router = build_router(state);
 
-    let (status, body) = send(router, get("/api/codegraph/stats")).await;
+    let (status, body) = send(router, get(&format!("/api/codegraph/stats?project_path={CODEGRAPH_TEST_PROJECT}"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["files"], 1);
     assert_eq!(body["nodes"], 2);
     assert_eq!(body["edges"], 1);
+    assert_eq!(body["stale"], false);
+}
+
+#[tokio::test]
+async fn codegraph_explore_endpoint_returns_root_and_callers() {
+    let (state, store) = open_state();
+    seed_codegraph(&store.lock().unwrap());
+    let router = build_router(state);
+
+    let (status, body) =
+        send(router, get(&format!("/api/codegraph/explore?project_path={CODEGRAPH_TEST_PROJECT}&target=callee"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["root"][0]["name"], "callee");
+    let callers: Vec<&str> = body["callers"].as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap()).collect();
+    assert!(callers.contains(&"caller"));
+    assert_eq!(body["stale"], false);
+}
+
+#[tokio::test]
+async fn codegraph_query_endpoint_keyword_and_prefixed_search() {
+    let (state, store) = open_state();
+    seed_codegraph(&store.lock().unwrap());
+    let router = build_router(state);
+
+    let (status, body) =
+        send(router.clone(), get(&format!("/api/codegraph/query?project_path={CODEGRAPH_TEST_PROJECT}&q=call"))).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = body["results"].as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"caller"));
+    assert!(names.contains(&"callee"));
+
+    let (status, body) = send(
+        router,
+        get(&format!("/api/codegraph/query?project_path={CODEGRAPH_TEST_PROJECT}&q=callers_of:callee")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = body["results"].as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["caller"]);
+}
+
+#[tokio::test]
+async fn codegraph_stale_flag_reflects_graph_dirty_set() {
+    let (state, store) = open_state();
+    seed_codegraph(&store.lock().unwrap());
+    let project_id = store.lock().unwrap().get_project(CODEGRAPH_TEST_PROJECT).unwrap().unwrap().id;
+
+    let mut dirty_state = state.clone();
+    dirty_state.graph_dirty = Some(Arc::new(Mutex::new(std::collections::HashSet::from([project_id]))));
+    let router = build_router(dirty_state);
+
+    let (status, body) = send(router, get(&format!("/api/codegraph/stats?project_path={CODEGRAPH_TEST_PROJECT}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["stale"], true);
 }
 
 // ---------------------------------------------------------------------------

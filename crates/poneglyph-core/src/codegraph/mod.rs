@@ -5,12 +5,14 @@
 
 pub mod blast_radius;
 pub mod build;
+pub mod explore;
 pub mod export;
 pub mod parse;
 pub mod query;
 
 pub use blast_radius::{BlastRadiusReport, DependentNode, blast_radius};
 pub use build::{BuildReport, build};
+pub use explore::{ExploreReport, Snippet, explore};
 pub use export::{export_dot, export_graphml, export_json};
 pub use parse::language_for_extension;
 pub use query::{GraphQuery, parse_query, run as run_query};

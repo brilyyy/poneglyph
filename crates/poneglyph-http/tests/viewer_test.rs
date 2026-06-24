@@ -18,6 +18,7 @@ fn router() -> axum::Router {
         embedder: None,
         config: Arc::new(Config::default()),
         enrich: None,
+        graph_dirty: None,
     };
     build_router(state)
 }

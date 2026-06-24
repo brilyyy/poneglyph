@@ -1,3 +1,4 @@
+# poneglyph-config-version: 2
 # Poneglyph configuration. Commented keys use built-in defaults; uncomment
 # to override. Supports { env.VAR_NAME } interpolation for secrets.
 

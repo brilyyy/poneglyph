@@ -35,7 +35,7 @@ fn run(program: &str, args: &[&str]) -> Result<std::process::Output> {
 /// TCP-reachability check — same approach as `detect::detect_local_llm`.
 /// Good enough for "is something listening on this port", which is all a
 /// liveness probe needs; avoids pulling in an HTTP client crate.
-fn port_open(port: u16) -> bool {
+pub(crate) fn port_open(port: u16) -> bool {
     format!("127.0.0.1:{port}")
         .parse()
         .ok()

@@ -59,6 +59,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/settings", get(api::get_settings).patch(api::patch_settings))
         .route("/codegraph", get(api::codegraph_graph))
         .route("/codegraph/stats", get(api::codegraph_stats))
+        .route("/codegraph/explore", get(api::codegraph_explore))
+        .route("/codegraph/query", get(api::codegraph_search))
         .route("/token-savings", get(api::token_savings))
         .route("/agents-status", get(api::agents_status))
         .route("/services-status", get(api::services_status))

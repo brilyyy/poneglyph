@@ -1,5 +1,7 @@
 import type {
   AgentsStatus,
+  CgExploreReport,
+  CgNode,
   CodegraphResponse,
   CodegraphStats,
   GraphResponse,
@@ -81,10 +83,16 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
-  codegraph: (params: { focus?: string; depth?: number; limit?: number }) =>
+  codegraph: (params: { project_path: string; focus?: string; depth?: number; limit?: number }) =>
     request<CodegraphResponse>(`/api/codegraph${qs(params)}`),
 
   codegraphStats: () => request<CodegraphStats>('/api/codegraph/stats'),
+
+  codegraphExplore: (params: { project_path: string; target: string; depth?: number }) =>
+    request<CgExploreReport>(`/api/codegraph/explore${qs(params)}`),
+
+  codegraphQuery: (params: { project_path: string; q: string }) =>
+    request<{ results: CgNode[]; stale: boolean }>(`/api/codegraph/query${qs(params)}`),
 
   tokenSavings: () => request<TokenSavings>('/api/token-savings'),
 

@@ -62,6 +62,7 @@ enum Backend {
     OpenAiCompat {
         client: async_openai::Client<OpenAIConfig>,
         model: String,
+        max_tokens: u32,
     },
     #[cfg(feature = "llm-anthropic")]
     Anthropic {
@@ -145,6 +146,7 @@ impl LlmClient {
                     backend: Backend::OpenAiCompat {
                         client: async_openai::Client::with_config(oai),
                         model: model.to_string(),
+                        max_tokens: cfg.max_generation_tokens,
                     },
                 })
             }
@@ -168,7 +170,9 @@ impl LlmClient {
     pub async fn complete(&self, system: &str, user: &str) -> Result<String> {
         match &self.backend {
             #[cfg(feature = "llm-openai")]
-            Backend::OpenAiCompat { client, model } => complete_openai_compat(client, model, system, user).await,
+            Backend::OpenAiCompat { client, model, max_tokens } => {
+                complete_openai_compat(client, model, *max_tokens, system, user).await
+            }
             #[cfg(feature = "llm-anthropic")]
             Backend::Anthropic { http, base_url, api_key, model, max_tokens } => {
                 complete_anthropic(http, base_url, api_key, model, *max_tokens, system, user).await
@@ -259,16 +263,16 @@ fn non_empty_owned(s: &str, default: &str) -> String {
 }
 
 #[cfg(feature = "llm-openai")]
-async fn complete_openai_compat(
-    client: &async_openai::Client<OpenAIConfig>,
+fn build_openai_request(
     model: &str,
+    max_tokens: u32,
     system: &str,
     user: &str,
-) -> Result<String> {
-    let request = CreateChatCompletionRequestArgs::default()
+) -> Result<async_openai::types::CreateChatCompletionRequest> {
+    Ok(CreateChatCompletionRequestArgs::default()
         .model(model)
         .temperature(0.0)
-        .max_tokens(512u32)
+        .max_tokens(max_tokens)
         .messages([
             ChatCompletionRequestSystemMessageArgs::default()
                 .content(system)
@@ -279,8 +283,18 @@ async fn complete_openai_compat(
                 .build()?
                 .into(),
         ])
-        .build()?;
+        .build()?)
+}
 
+#[cfg(feature = "llm-openai")]
+async fn complete_openai_compat(
+    client: &async_openai::Client<OpenAIConfig>,
+    model: &str,
+    max_tokens: u32,
+    system: &str,
+    user: &str,
+) -> Result<String> {
+    let request = build_openai_request(model, max_tokens, system, user)?;
     let response = client.chat().create(request).await.context("LLM request failed")?;
     response
         .choices
@@ -671,6 +685,14 @@ mod tests {
             ..Default::default()
         };
         assert!(LlmClient::from_config(&cfg).is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "llm-openai")]
+    #[allow(deprecated)] // `max_tokens` is the field the builder above also sets; still what OpenAI-compat servers expect.
+    fn openai_compat_request_uses_configured_max_tokens() {
+        let req = build_openai_request("test-model", 777, "sys", "user").unwrap();
+        assert_eq!(req.max_tokens, Some(777));
     }
 
     #[test]

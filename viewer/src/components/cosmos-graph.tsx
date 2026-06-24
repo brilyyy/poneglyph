@@ -50,6 +50,9 @@ export function CosmosGraph({ nodes, links, onNodeClick, onBackgroundClick, clas
     if (!containerRef.current) return
     const config: GraphConfig = {
       backgroundColor: getTheme() === 'dark' ? '#0a0a0a' : '#ffffff',
+      // ponytail: cap DPR at 2 — 3x+ panels otherwise render ~9x the
+      // fragment-shader work of a 1x canvas for no visible gain.
+      pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
       spaceSize: 8192,
       simulationGravity: 0.25,
       simulationCenter: 0.5,
@@ -69,6 +72,11 @@ export function CosmosGraph({ nodes, links, onNodeClick, onBackgroundClick, clas
         if (id) callbacksRef.current.onNodeClick?.(id)
       },
       onBackgroundClick: () => callbacksRef.current.onBackgroundClick?.(),
+      // The post-render fitView below is a same-frame snapshot taken before
+      // the force simulation has spread points out from their initial
+      // scatter — correct it once the layout actually settles. `false`:
+      // a sim that just cooled down shouldn't be kicked back into motion.
+      onSimulationEnd: () => graphRef.current?.fitView(250, 0.1, false),
     }
     const graph = new Graph(containerRef.current, config)
     graphRef.current = graph
@@ -113,7 +121,8 @@ export function CosmosGraph({ nodes, links, onNodeClick, onBackgroundClick, clas
     // Large graphs skip the force simulation entirely (native cosmos.gl
     // config flag) and render statically at their stored/scattered
     // positions — keeps WebGL load down instead of animating forever.
-    graph.setConfigPartial({ enableSimulation: nodes.length <= 2000 })
+    const enableSimulation = nodes.length <= 2000
+    graph.setConfigPartial({ enableSimulation })
 
     const validLinks = links.filter((l) => idToIndex.has(l.source) && idToIndex.has(l.target))
     const linkArr = new Float32Array(validLinks.length * 2)
@@ -130,6 +139,14 @@ export function CosmosGraph({ nodes, links, onNodeClick, onBackgroundClick, clas
     graph.setLinks(linkArr)
     graph.setLinkWidths(linkWidths)
     graph.render()
+    // ponytail: refits on every nodes/links change (load, expand, filter
+    // toggle, limit change) — resets any manual pan/zoom each time. That's
+    // the requested behavior; add a "lock view" toggle if it gets annoying.
+    // This call is an instant rough preview; for simulated graphs the real
+    // fit happens via onSimulationEnd above once positions settle — keep
+    // both, this one is the only fit that ever runs for static (>2000
+    // node, simulation-disabled) graphs.
+    if (nodes.length > 0) graph.fitView(250, 0.1, enableSimulation)
   }, [nodes, links])
 
   return <div ref={containerRef} className={className} style={{ width: '100%', height: '100%' }} />

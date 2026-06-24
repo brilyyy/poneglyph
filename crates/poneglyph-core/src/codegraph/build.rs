@@ -14,6 +14,7 @@ use rayon::prelude::*;
 use crate::config::CodeGraphConfig;
 use crate::model::{CgEdge, CgEdgeKind, CgFile, CgNodeKind};
 use crate::privacy::build_exclude_matcher;
+use crate::project;
 use crate::store::Store;
 
 use super::parse::{self, ParsedFile};
@@ -31,6 +32,9 @@ pub struct BuildReport {
 /// `force = false` (`graph update`) skips files whose content hash hasn't
 /// changed since the last build.
 pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) -> Result<BuildReport> {
+    let project = project::detect_project(store, &root.to_string_lossy())?;
+    let project_id = project.id.as_str();
+
     let exclude = build_exclude_matcher(&config.exclude_patterns);
     let candidates = collect_candidates(root, &exclude);
 
@@ -54,7 +58,7 @@ pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) 
         };
         let hash = content_hash(&source);
 
-        if !force && store.cg_file_hash(&rel)?.as_deref() == Some(hash.as_str()) {
+        if !force && store.cg_file_hash(project_id, &rel)?.as_deref() == Some(hash.as_str()) {
             report.files_unchanged += 1;
             continue;
         }
@@ -77,10 +81,10 @@ pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) 
     let mut pending: Vec<(String, ParsedFile)> = Vec::new();
     for result in parsed {
         let (rel, language, hash, parsed) = result?;
-        store.cg_clear_file(&rel)?;
-        store.cg_upsert_file(&CgFile { path: rel.clone(), language: language.to_string(), content_hash: hash })?;
+        store.cg_clear_file(project_id, &rel)?;
+        store.cg_upsert_file(project_id, &CgFile { path: rel.clone(), language: language.to_string(), content_hash: hash })?;
         for node in &parsed.nodes {
-            store.cg_insert_node(node)?;
+            store.cg_insert_node(project_id, node)?;
         }
         report.files_parsed += 1;
         report.nodes += parsed.nodes.len();
@@ -88,15 +92,15 @@ pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) 
     }
 
     // Files that existed in a previous build but were deleted or excluded this run.
-    for file in store.cg_all_files()? {
+    for file in store.cg_all_files(project_id)? {
         if !current_paths.contains(&file.path) {
-            store.cg_clear_file(&file.path)?;
+            store.cg_clear_file(project_id, &file.path)?;
             report.files_removed += 1;
         }
     }
 
     for (file_path, parsed) in &pending {
-        report.edges += resolve_edges(store, file_path, parsed)?;
+        report.edges += resolve_edges(store, project_id, file_path, parsed)?;
     }
 
     Ok(report)
@@ -105,27 +109,47 @@ pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) 
 /// Name-only resolution: no type/scope information, so an overloaded or
 /// duplicate name picks whichever match comes back first. Acceptable for a
 /// "what's nearby" code graph; not a substitute for a real type checker.
-fn resolve_edges(store: &Store, file_path: &str, parsed: &ParsedFile) -> Result<usize> {
+fn resolve_edges(store: &Store, project_id: &str, file_path: &str, parsed: &ParsedFile) -> Result<usize> {
     let mut count = 0;
 
     for (caller_id, callee_name) in &parsed.calls {
         let Some(caller_id) = caller_id else { continue };
-        let candidates = store.cg_nodes_by_name(callee_name, &[CgNodeKind::Function, CgNodeKind::Method])?;
+        let candidates = store.cg_nodes_by_name(project_id, callee_name, &[CgNodeKind::Function, CgNodeKind::Method])?;
         let Some(target) = candidates.into_iter().next() else { continue };
         if target.id == *caller_id {
             continue; // skip self-recursive calls — not useful for blast-radius fan-out
         }
-        if store.cg_insert_edge(&CgEdge { src_id: caller_id.clone(), dst_id: target.id, kind: CgEdgeKind::Calls })? {
+        if store.cg_insert_edge(project_id, &CgEdge { src_id: caller_id.clone(), dst_id: target.id, kind: CgEdgeKind::Calls })? {
             count += 1;
         }
     }
 
     for (test_id, target_guess) in &parsed.tests {
         let Some(name) = target_guess else { continue };
-        let candidates = store.cg_nodes_by_name(name, &[CgNodeKind::Function, CgNodeKind::Method])?;
+        let candidates = store.cg_nodes_by_name(project_id, name, &[CgNodeKind::Function, CgNodeKind::Method])?;
         let target = candidates.iter().find(|n| n.file_path == file_path).or_else(|| candidates.first());
         let Some(target) = target else { continue };
-        if store.cg_insert_edge(&CgEdge { src_id: test_id.clone(), dst_id: target.id.clone(), kind: CgEdgeKind::Tests })? {
+        if store.cg_insert_edge(project_id, &CgEdge { src_id: test_id.clone(), dst_id: target.id.clone(), kind: CgEdgeKind::Tests })? {
+            count += 1;
+        }
+    }
+
+    for (subtype_name, supertype_name) in &parsed.inherits {
+        let subtype_candidates = store.cg_nodes_by_name(project_id, subtype_name, &[CgNodeKind::Type])?;
+        let Some(subtype) =
+            subtype_candidates.iter().find(|n| n.file_path == file_path).or_else(|| subtype_candidates.first())
+        else {
+            continue;
+        };
+        let supertype_candidates = store.cg_nodes_by_name(project_id, supertype_name, &[CgNodeKind::Type])?;
+        let Some(supertype) = supertype_candidates.into_iter().next() else { continue };
+        if subtype.id == supertype.id {
+            continue;
+        }
+        if store.cg_insert_edge(
+            project_id,
+            &CgEdge { src_id: subtype.id.clone(), dst_id: supertype.id, kind: CgEdgeKind::Extends },
+        )? {
             count += 1;
         }
     }
@@ -187,6 +211,10 @@ mod tests {
         CodeGraphConfig::default()
     }
 
+    fn pid(store: &Store, dir: &std::path::Path) -> String {
+        project::detect_project(store, &dir.to_string_lossy()).unwrap().id
+    }
+
     #[test]
     fn build_parses_matching_files_and_skips_excluded() {
         let dir = tempdir().unwrap();
@@ -199,7 +227,7 @@ mod tests {
 
         assert_eq!(report.files_parsed, 1);
         assert_eq!(report.nodes, 1);
-        let nodes = store.cg_nodes_in_file("lib.rs").unwrap();
+        let nodes = store.cg_nodes_in_file(&pid(&store, dir.path()), "lib.rs").unwrap();
         assert_eq!(nodes[0].name, "foo");
     }
 
@@ -231,7 +259,7 @@ mod tests {
         std::fs::write(&path, "fn a() {}\nfn b() {}\n").unwrap();
         let report2 = build(&store, dir.path(), &cfg(), false).unwrap();
         assert_eq!(report2.files_parsed, 1);
-        assert_eq!(store.cg_nodes_in_file("a.rs").unwrap().len(), 2);
+        assert_eq!(store.cg_nodes_in_file(&pid(&store, dir.path()), "a.rs").unwrap().len(), 2);
     }
 
     #[test]
@@ -242,12 +270,12 @@ mod tests {
 
         let store = Store::open_in_memory().unwrap();
         build(&store, dir.path(), &cfg(), true).unwrap();
-        assert_eq!(store.cg_all_files().unwrap().len(), 1);
+        assert_eq!(store.cg_all_files(&pid(&store, dir.path())).unwrap().len(), 1);
 
         std::fs::remove_file(&path).unwrap();
         let report = build(&store, dir.path(), &cfg(), false).unwrap();
         assert_eq!(report.files_removed, 1);
-        assert!(store.cg_all_files().unwrap().is_empty());
+        assert!(store.cg_all_files(&pid(&store, dir.path())).unwrap().is_empty());
     }
 
     #[test]
@@ -273,8 +301,9 @@ mod tests {
         let report = build(&store, dir.path(), &cfg(), true).unwrap();
 
         assert_eq!(report.files_parsed, 1);
-        assert_eq!(store.cg_nodes_in_file("kept.rs").unwrap().len(), 1);
-        assert!(store.cg_nodes_in_file("ignored_dir/skip.rs").unwrap().is_empty());
+        let pid = pid(&store, dir.path());
+        assert_eq!(store.cg_nodes_in_file(&pid, "kept.rs").unwrap().len(), 1);
+        assert!(store.cg_nodes_in_file(&pid, "ignored_dir/skip.rs").unwrap().is_empty());
     }
 
     #[test]
@@ -288,7 +317,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let report = build(&store, dir.path(), &cfg(), true).unwrap();
         assert_eq!(report.files_parsed, 1);
-        assert_eq!(store.cg_nodes_in_file("a.rs").unwrap().len(), 1);
+        assert_eq!(store.cg_nodes_in_file(&pid(&store, dir.path()), "a.rs").unwrap().len(), 1);
     }
 
     #[test]
@@ -306,8 +335,9 @@ mod tests {
 
         // Both excluded — neither source overrides the other into inclusion.
         assert_eq!(report.files_parsed, 0);
-        assert!(store.cg_nodes_in_file("a.rs").unwrap().is_empty());
-        assert!(store.cg_nodes_in_file("b.rs").unwrap().is_empty());
+        let pid = pid(&store, dir.path());
+        assert!(store.cg_nodes_in_file(&pid, "a.rs").unwrap().is_empty());
+        assert!(store.cg_nodes_in_file(&pid, "b.rs").unwrap().is_empty());
     }
 
     #[test]
@@ -340,7 +370,8 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let report = build(&store, dir.path(), &config, true).unwrap();
         assert_eq!(report.files_parsed, 1);
-        assert!(store.cg_nodes_in_file("a.py").unwrap().len() == 1);
-        assert!(store.cg_nodes_in_file("a.rs").unwrap().is_empty());
+        let pid = pid(&store, dir.path());
+        assert!(store.cg_nodes_in_file(&pid, "a.py").unwrap().len() == 1);
+        assert!(store.cg_nodes_in_file(&pid, "a.rs").unwrap().is_empty());
     }
 }
