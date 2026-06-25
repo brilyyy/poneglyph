@@ -242,3 +242,14 @@ export interface ServicesStatus {
   }
   viewer: { up: boolean; port: number }
 }
+
+/** Live engine work — /api/activity. Job maps are job_type → count. */
+export interface Activity {
+  phases: string[]
+  jobs: {
+    running: Record<string, number>
+    pending: Record<string, number>
+  }
+  graph: { dirty_projects: string[] }
+  generated_at: string
+}

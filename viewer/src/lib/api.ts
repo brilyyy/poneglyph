@@ -1,4 +1,5 @@
 import type {
+  Activity,
   AgentsStatus,
   CgExploreReport,
   CgNode,
@@ -99,6 +100,8 @@ export const api = {
   agentsStatus: () => request<AgentsStatus>('/api/agents-status'),
 
   servicesStatus: () => request<ServicesStatus>('/api/services-status'),
+
+  activity: () => request<Activity>('/api/activity'),
 
   context: (params: { project_path: string; max_tokens?: number }) =>
     request<ProjectContext>(`/api/context${qs(params)}`),

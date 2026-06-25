@@ -3,6 +3,7 @@ import { Link, Outlet, createRootRoute, useRouterState } from '@tanstack/react-r
 import { useQuery } from '@tanstack/react-query'
 import { HugeiconsIcon } from '@hugeicons/react'
 import {
+  Activity03Icon,
   ChartAverageIcon,
   CodeSquareIcon,
   DashboardSquare01Icon,
@@ -48,6 +49,7 @@ const NAV = [
   { to: '/graph', label: 'Graph', icon: NeuralNetworkIcon, exact: false },
   { to: '/codegraph', label: 'Code graph', icon: CodeSquareIcon, exact: false },
   { to: '/token-savings', label: 'Token savings', icon: ChartAverageIcon, exact: false },
+  { to: '/activity', label: 'Activity', icon: Activity03Icon, exact: false },
   { to: '/status', label: 'Status', icon: PulseIcon, exact: false },
   { to: '/settings', label: 'Settings', icon: Settings01Icon, exact: false },
 ] as const

@@ -26,6 +26,10 @@ pub struct AppState {
     /// server's file-watch supervisor). `None` when no watcher is running
     /// in this process (e.g. the standalone `viewer` command).
     pub graph_dirty: Option<Arc<Mutex<HashSet<String>>>>,
+    /// Live-status registry shared with the enrich worker + graph supervisor.
+    /// `None` ⇒ `/api/activity` reports no in-flight phases (still serves job
+    /// queue + dirty-project counts).
+    pub activity: Option<Arc<poneglyph_core::activity::Activity>>,
 }
 
 impl AppState {

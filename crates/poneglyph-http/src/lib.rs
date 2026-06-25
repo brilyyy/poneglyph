@@ -64,6 +64,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/token-savings", get(api::token_savings))
         .route("/agents-status", get(api::agents_status))
         .route("/services-status", get(api::services_status))
+        .route("/activity", get(api::activity))
         .route("/session-summary", get(api::session_summary));
 
     let guarded = Router::new()

@@ -524,6 +524,7 @@ type ServerBootstrap = (
     Arc<Config>,
     poneglyph_core::enrich::EnrichHandle,
     tokio::task::JoinHandle<()>,
+    Arc<poneglyph_core::activity::Activity>,
 );
 
 /// Open the store + embedder and spawn the background enrich worker — the
@@ -535,6 +536,9 @@ async fn open_store_and_worker(config: &Config) -> Result<ServerBootstrap> {
     let store = Arc::new(Mutex::new(store));
     let embedder = try_embedder(config).await;
     let shared_config = Arc::new(config.clone());
+    // Shared live-status registry: the same Arc goes to the enrich worker, the
+    // graph-watch supervisor, and AppState so `/api/activity` sees their work.
+    let activity = poneglyph_core::activity::Activity::new();
 
     // Background worker on its own connection (WAL): edges always, LLM
     // enrichment only when enabled in config.
@@ -550,10 +554,11 @@ async fn open_store_and_worker(config: &Config) -> Result<ServerBootstrap> {
                 config: config.clone(),
                 embedder: embedder.clone(),
             }),
+            activity: Some(activity.clone()),
         },
     );
 
-    Ok((store, embedder, shared_config, enrich, worker))
+    Ok((store, embedder, shared_config, enrich, worker, activity))
 }
 
 /// No subcommand: print the logo, bring up MCP + viewer together in one
@@ -565,8 +570,8 @@ async fn cmd_default(config: &Config) -> Result<()> {
     poneglyph_http::validate_security(config)?;
     println!("{LOGO}");
 
-    let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
-    let graph_watch = spawn_graph_watch_supervisor(store.clone(), shared_config.clone());
+    let (store, embedder, shared_config, enrich, worker, activity) = open_store_and_worker(config).await?;
+    let graph_watch = spawn_graph_watch_supervisor(store.clone(), shared_config.clone(), activity.clone());
 
     let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store.clone(), embedder.clone(), shared_config.clone())
         .with_enrich(enrich.clone())
@@ -577,6 +582,7 @@ async fn cmd_default(config: &Config) -> Result<()> {
         config: shared_config.clone(),
         enrich: Some(enrich.clone()),
         graph_dirty: Some(graph_watch.dirty.clone()),
+        activity: Some(activity.clone()),
     };
     let mcp_app = poneglyph_http::build_router(mcp_state)
         .route("/health", axum::routing::get(|| async { "ok" }))
@@ -592,6 +598,7 @@ async fn cmd_default(config: &Config) -> Result<()> {
         config: shared_config,
         enrich: Some(enrich),
         graph_dirty: Some(graph_watch.dirty.clone()),
+        activity: Some(activity),
     };
     let viewer_listener = poneglyph_http::bind(config)
         .await
@@ -617,8 +624,8 @@ async fn cmd_default(config: &Config) -> Result<()> {
 async fn cmd_default(config: &Config) -> Result<()> {
     println!("{LOGO}");
 
-    let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
-    let graph_watch = spawn_graph_watch_supervisor(store.clone(), shared_config.clone());
+    let (store, embedder, shared_config, enrich, worker, activity) = open_store_and_worker(config).await?;
+    let graph_watch = spawn_graph_watch_supervisor(store.clone(), shared_config.clone(), activity.clone());
 
     let mcp = poneglyph_mcp::tools::PoneglyphMcp::new(store.clone(), embedder.clone(), shared_config.clone())
         .with_enrich(enrich.clone())
@@ -629,6 +636,7 @@ async fn cmd_default(config: &Config) -> Result<()> {
         config: shared_config.clone(),
         enrich: Some(enrich),
         graph_dirty: Some(graph_watch.dirty.clone()),
+        activity: Some(activity),
     };
     let app = poneglyph_http::build_router(http_state)
         .route("/health", axum::routing::get(|| async { "ok" }))
@@ -655,8 +663,8 @@ async fn cmd_default(config: &Config) -> Result<()> {
 /// hooks have one always-on process to talk to. `--stdio` keeps the old
 /// editor-spawned-per-session shape for clients that need it.
 async fn cmd_mcp(config: &Config, stdio: bool) -> Result<()> {
-    let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
-    let graph_watch = spawn_graph_watch_supervisor(store.clone(), shared_config.clone());
+    let (store, embedder, shared_config, enrich, worker, activity) = open_store_and_worker(config).await?;
+    let graph_watch = spawn_graph_watch_supervisor(store.clone(), shared_config.clone(), activity.clone());
 
     let health = poneglyph_core::llm::health(&config.llm).await;
     tracing::info!(
@@ -684,6 +692,7 @@ async fn cmd_mcp(config: &Config, stdio: bool) -> Result<()> {
         config: shared_config,
         enrich: Some(enrich),
         graph_dirty: Some(graph_watch.dirty.clone()),
+        activity: Some(activity),
     };
     let app = poneglyph_http::build_router(http_state)
         .route("/health", axum::routing::get(|| async { "ok" }))
@@ -721,7 +730,11 @@ struct GraphWatchHandle {
 /// to "how often to reconcile the watched-project set against
 /// graph_projects.toml" (pick up projects `graph init`'d after the daemon
 /// started); 0 still means disabled entirely.
-fn spawn_graph_watch_supervisor(store: Arc<Mutex<Store>>, config: Arc<Config>) -> GraphWatchHandle {
+fn spawn_graph_watch_supervisor(
+    store: Arc<Mutex<Store>>,
+    config: Arc<Config>,
+    activity: Arc<poneglyph_core::activity::Activity>,
+) -> GraphWatchHandle {
     let dirty: Arc<Mutex<std::collections::HashSet<String>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let dirty_for_task = dirty.clone();
 
@@ -734,7 +747,7 @@ fn spawn_graph_watch_supervisor(store: Arc<Mutex<Store>>, config: Arc<Config>) -
         // Catch up once before watching, so a freshly-started daemon doesn't
         // serve stale results until the first debounce window elapses.
         for p in &projects {
-            rebuild_project(&store, &config, p);
+            rebuild_project(&store, &config, p, &activity);
         }
 
         let (tx, rx) = std::sync::mpsc::channel::<String>();
@@ -765,7 +778,7 @@ fn spawn_graph_watch_supervisor(store: Arc<Mutex<Store>>, config: Arc<Config>) -
             for dir in ready {
                 last_event.remove(&dir);
                 if let Some(p) = projects.iter().find(|p| p.dir == dir) {
-                    rebuild_project(&store, &config, p);
+                    rebuild_project(&store, &config, p, &activity);
                     dirty_for_task.lock().unwrap().remove(&p.id);
                 }
             }
@@ -812,11 +825,17 @@ fn install_watcher(
     }
 }
 
-fn rebuild_project(store: &Arc<Mutex<Store>>, config: &Config, p: &graph_registry::GraphProjectEntry) {
+fn rebuild_project(
+    store: &Arc<Mutex<Store>>,
+    config: &Config,
+    p: &graph_registry::GraphProjectEntry,
+    activity: &Arc<poneglyph_core::activity::Activity>,
+) {
     let path = PathBuf::from(&p.dir);
     if !path.is_dir() {
         return;
     }
+    let _activity = activity.begin("graph_build");
     let result = {
         let Ok(guard) = store.lock() else { return };
         poneglyph_core::codegraph::build(&guard, &path, &config.graph, false)
@@ -835,7 +854,7 @@ fn rebuild_project(store: &Arc<Mutex<Store>>, config: &Config, p: &graph_registr
 #[cfg(feature = "viewer")]
 async fn cmd_viewer(config: &Config) -> Result<()> {
     poneglyph_http::validate_security(config)?;
-    let (store, embedder, shared_config, enrich, worker) = open_store_and_worker(config).await?;
+    let (store, embedder, shared_config, enrich, worker, activity) = open_store_and_worker(config).await?;
 
     let listener = poneglyph_http::bind(config)
         .await
@@ -848,6 +867,7 @@ async fn cmd_viewer(config: &Config) -> Result<()> {
         // ponytail: no file watcher in this command path, so this view of
         // the graph can never be stale — `poneglyph mcp` is what rebuilds.
         graph_dirty: None,
+        activity: Some(activity),
     };
 
     println!(

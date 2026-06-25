@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { memo, useEffect, useRef } from 'react'
 import { Graph, type GraphConfig } from '@cosmos.gl/graph'
 
 import { getTheme } from '#/lib/theme.ts'
@@ -38,7 +38,7 @@ function hexToRgba(hex: string, alpha: number): [number, number, number, number]
  * (React Flow) can. Node positions persist in `positionsRef` across data
  * updates so expanding a neighborhood doesn't reshuffle existing points.
  */
-export function CosmosGraph({ nodes, links, onNodeClick, onBackgroundClick, className }: CosmosGraphProps) {
+function CosmosGraphImpl({ nodes, links, onNodeClick, onBackgroundClick, className }: CosmosGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const graphRef = useRef<Graph | null>(null)
   const nodeIdsRef = useRef<string[]>([])
@@ -151,3 +151,9 @@ export function CosmosGraph({ nodes, links, onNodeClick, onBackgroundClick, clas
 
   return <div ref={containerRef} className={className} style={{ width: '100%', height: '100%' }} />
 }
+
+// memo: parents already memoize nodes/links, so with stable callbacks the
+// whole component skips re-render when only sibling state (selection, filters)
+// changes. The data effect is keyed on [nodes, links] regardless, so this is
+// pure insurance against avoidable work.
+export const CosmosGraph = memo(CosmosGraphImpl)

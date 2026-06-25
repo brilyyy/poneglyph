@@ -51,6 +51,10 @@ pub struct WorkerConfig {
     /// pipeline + decay across all projects every `interval_hours`. `None`
     /// disables the scheduler tick entirely.
     pub consolidation: Option<ConsolidationScheduler>,
+    /// Live-status registry: when set, the worker marks "enrich" active while
+    /// draining a non-empty batch and "consolidate" active during a scheduled
+    /// pass, so the viewer's activity panel can see them. `None` ⇒ no tracking.
+    pub activity: Option<Arc<crate::activity::Activity>>,
 }
 
 /// `pipeline::run_pipeline_for_all_projects` and `consolidate::run_decay`
@@ -185,6 +189,9 @@ pub async fn process_jobs_async(
 ) -> Result<usize> {
     let now = Utc::now();
     let jobs = store.get_pending_jobs(DRAIN_BATCH)?;
+    // Mark "enrich" active only when there's a batch to drain — an empty pass
+    // is microseconds and shouldn't light up the panel.
+    let _activity = cfg.activity.as_ref().filter(|_| !jobs.is_empty()).map(|a| a.begin("enrich"));
     let mut processed = 0;
 
     for job in jobs {
@@ -307,6 +314,7 @@ pub fn spawn_worker(
                 let interval = std::time::Duration::from_secs(scheduler.config.consolidation.interval_hours.max(1) * 3600);
                 if scheduler.config.consolidation.enabled && last_consolidation.elapsed() >= interval {
                     last_consolidation = tokio::time::Instant::now();
+                    let _activity = cfg.activity.as_ref().map(|a| a.begin("consolidate"));
                     match crate::pipeline::run_pipeline_for_all_projects(
                         &mut store,
                         &scheduler.config,
@@ -360,6 +368,7 @@ mod tests {
             compression_enabled: false,
             compression_mode: CompressionMode::default(),
             consolidation: None,
+            activity: None,
         }
     }
 

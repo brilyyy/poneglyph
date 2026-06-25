@@ -25,6 +25,7 @@ fn test_state(config: Config) -> (AppState, Arc<Mutex<Store>>) {
         config: Arc::new(config),
         enrich: None,
         graph_dirty: None,
+        activity: None,
     };
     (state, store)
 }
@@ -826,4 +827,28 @@ async fn agents_status_reports_config_flags_for_every_agent() {
         assert_eq!(body[agent]["enabled"], false, "{agent} should be disabled by default");
         assert!(body[agent]["detected"].is_boolean());
     }
+}
+
+// ---------------------------------------------------------------------------
+// /api/activity
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn activity_reports_pending_jobs_and_empty_phases() {
+    let (state, store) = open_state();
+    // Enqueue a compute_edges job so the pending bucket is non-empty.
+    {
+        let s = store.lock().unwrap();
+        let mem = s.create_memory("c", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        poneglyph_core::enrich::enqueue_compute_edges(&s, &mem.id).unwrap();
+    }
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/activity")).await;
+    assert_eq!(status, StatusCode::OK);
+    // No Activity registry wired in tests ⇒ no in-flight phases.
+    assert_eq!(body["phases"], json!([]));
+    assert_eq!(body["jobs"]["pending"]["compute_edges"], 1);
+    assert_eq!(body["graph"]["dirty_projects"], json!([]));
+    assert!(body["generated_at"].is_string());
 }

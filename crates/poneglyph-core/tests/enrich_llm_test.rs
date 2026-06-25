@@ -69,6 +69,7 @@ fn worker_cfg() -> WorkerConfig {
         compression_enabled: false,
         compression_mode: CompressionMode::default(),
         consolidation: None,
+        activity: None,
     }
 }
 

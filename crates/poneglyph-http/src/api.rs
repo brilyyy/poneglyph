@@ -457,6 +457,38 @@ pub async fn services_status(State(state): State<AppState>) -> ApiResult<Value> 
 }
 
 // ---------------------------------------------------------------------------
+// /api/activity — live engine work for the activity panel: in-flight phases
+// (enrich/consolidate/graph_build) + outstanding job queue grouped by type +
+// projects awaiting a graph rebuild. Polled by the viewer when live-tracking.
+// ---------------------------------------------------------------------------
+
+pub async fn activity(State(state): State<AppState>) -> ApiResult<Value> {
+    let phases = state.activity.as_ref().map(|a| a.snapshot()).unwrap_or_default();
+
+    let (mut running, mut pending) = (serde_json::Map::new(), serde_json::Map::new());
+    {
+        let store = state.lock_store()?;
+        for (job_type, status, count) in store.job_activity()? {
+            let bucket = if status == "running" { &mut running } else { &mut pending };
+            bucket.insert(job_type, json!(count));
+        }
+    }
+
+    let dirty_projects: Vec<String> = state
+        .graph_dirty
+        .as_ref()
+        .and_then(|d| d.lock().ok().map(|d| d.iter().cloned().collect()))
+        .unwrap_or_default();
+
+    Ok(Json(json!({
+        "phases": phases,
+        "jobs": { "running": running, "pending": pending },
+        "graph": { "dirty_projects": dirty_projects },
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+    })))
+}
+
+// ---------------------------------------------------------------------------
 // /api/context — zero-LLM session context injection (PRD §8.10)
 // ---------------------------------------------------------------------------
 

@@ -5,7 +5,12 @@ import { routeTree } from "./routeTree.gen";
 import { TooltipProvider } from "./components/ui/tooltip";
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
+  // staleTime: navigating between routes reuses cached data instead of
+  // refetching every mount. Live views (activity/status) opt back in with
+  // their own refetchInterval, which fires regardless of staleness.
+  defaultOptions: {
+    queries: { retry: 1, refetchOnWindowFocus: false, staleTime: 30_000 },
+  },
 });
 
 const router = createRouter({

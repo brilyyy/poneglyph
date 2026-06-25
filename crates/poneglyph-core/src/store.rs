@@ -262,7 +262,10 @@ impl Store {
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open db: {}", path.display()))?;
 
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+        // ponytail: synchronous=NORMAL under WAL risks only losing the last
+        // commit on power loss, never corruption — fine for a derived store that
+        // rebuilds. Bump to FULL if durability of the most recent write matters.
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")
             .context("failed to set pragmas")?;
 
         let mut store = Self { conn };
@@ -1300,6 +1303,20 @@ impl Store {
         Ok(jobs)
     }
 
+    /// Live queue depth for the activity panel: `(job_type, status, count)`
+    /// for every pending/running job, grouped. Done/failed are excluded —
+    /// the panel shows what's outstanding, not history.
+    pub fn job_activity(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT job_type, status, COUNT(*) FROM jobs
+             WHERE status IN ('pending','running') GROUP BY job_type, status",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     /// Claim a job: status → running, attempts += 1. The only place attempts
     /// are counted, so attempts == number of executions started.
     pub fn mark_job_running(&self, id: &str) -> Result<()> {
@@ -1472,7 +1489,10 @@ impl Store {
             "SELECT id, file_path, kind, name, start_line, end_line FROM cg_nodes
              WHERE project_id = ?1 AND name = ?2 AND kind IN ({kind_list})"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        // prepare_cached: this runs once per call/test/inherit edge during
+        // resolution; the dynamic `kind_list` yields a small fixed set of SQL
+        // strings, each cached after first compile.
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let nodes = stmt.query_map(params![project_id, name], row_to_cg_node)?.collect::<rusqlite::Result<_>>()?;
         Ok(nodes)
     }
@@ -1723,6 +1743,28 @@ mod tests {
 
     fn test_store() -> Store {
         Store::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn job_activity_groups_pending_and_running_only() {
+        let store = test_store();
+        let mem = store.create_memory("c", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        let j1 = store.create_job(JobType::ComputeEdges, &mem.id).unwrap();
+        store.create_job(JobType::Summarize, &mem.id).unwrap();
+        store.mark_job_running(&j1.id).unwrap(); // compute_edges → running
+        // A done job must NOT appear in the activity snapshot.
+        let done = store.create_job(JobType::ScoreImportance, &mem.id).unwrap();
+        store.update_job_status(&done.id, JobStatus::Done, None).unwrap();
+
+        let mut got = store.job_activity().unwrap();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("compute_edges".to_string(), "running".to_string(), 1),
+                ("summarize".to_string(), "pending".to_string(), 1),
+            ]
+        );
     }
 
     #[test]

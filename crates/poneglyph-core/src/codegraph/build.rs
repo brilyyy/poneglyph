@@ -40,29 +40,42 @@ pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) 
 
     let mut current_paths = std::collections::HashSet::new();
     let mut report = BuildReport::default();
-    // (rel_path, language, source, hash) for files that need (re)parsing this run.
-    let mut to_parse: Vec<(String, &'static str, String, String)> = Vec::new();
 
+    // Filter to known-language files (cheap, serial), recording every candidate
+    // in current_paths for the removal pass below.
+    let mut targets: Vec<(String, &'static str, &PathBuf)> = Vec::new();
     for path in &candidates {
-        let rel = relative_slash_path(root, path);
         let Some(ext) = path.extension().and_then(|e| e.to_str()) else { continue };
         let Some(language) = parse::language_for_extension(ext) else { continue };
         if !config.languages.is_empty() && !config.languages.iter().any(|l| l == language) {
             continue;
         }
+        let rel = relative_slash_path(root, path);
         current_paths.insert(rel.clone());
+        targets.push((rel, language, path));
+    }
 
-        let source = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(_) => continue, // binary/non-UTF8 file masquerading under a known extension
-        };
-        let hash = content_hash(&source);
+    // Read + hash in parallel: on `graph update` every file is re-read and
+    // hashed to detect changes, so I/O + hashing — not parsing — is the serial
+    // floor on a large tree. Order-preserving collect keeps the downstream
+    // serial DB writes deterministic. Unreadable files (binary/non-UTF8 under a
+    // known extension) drop out as None.
+    let read: Vec<(String, &'static str, String, String)> = targets
+        .into_par_iter()
+        .filter_map(|(rel, language, path)| {
+            let source = std::fs::read_to_string(path).ok()?;
+            let hash = content_hash(&source);
+            Some((rel, language, source, hash))
+        })
+        .collect();
 
+    // (rel_path, language, source, hash) for files that need (re)parsing this run.
+    let mut to_parse: Vec<(String, &'static str, String, String)> = Vec::new();
+    for (rel, language, source, hash) in read {
         if !force && store.cg_file_hash(project_id, &rel)?.as_deref() == Some(hash.as_str()) {
             report.files_unchanged += 1;
             continue;
         }
-
         to_parse.push((rel, language, source, hash));
     }
 
@@ -75,6 +88,13 @@ pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) 
             Ok((rel, language, hash, parsed))
         })
         .collect();
+
+    // One transaction around every write below: without it each insert is its
+    // own autocommit (one fsync per node/edge under WAL). It also makes a build
+    // atomic — a mid-run failure rolls back instead of leaving the graph half
+    // written. Reads during edge resolution see this connection's own
+    // uncommitted writes, so resolution still works inside the txn.
+    let tx = store.conn.unchecked_transaction()?;
 
     // (file_path, parsed) for files we re-parsed this run — edge resolution
     // happens after every file's nodes are persisted.
@@ -103,6 +123,7 @@ pub fn build(store: &Store, root: &Path, config: &CodeGraphConfig, force: bool) 
         report.edges += resolve_edges(store, project_id, file_path, parsed)?;
     }
 
+    tx.commit()?;
     Ok(report)
 }
 
