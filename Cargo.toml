@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.2.1"
+version = "1.2.3"
 edition = "2024"
 authors = ["Brilyan"]
 license = "MIT"
@@ -108,6 +108,7 @@ tree-sitter-scala      = { version = "0.26" }
 notify                 = { version = "6" }
 ignore                 = { version = "0.4" }
 rayon                  = { version = "1" }
+libc                   = { version = "0.2", default-features = false }
 
 # Internal crates
 poneglyph-core = { path = "crates/poneglyph-core" }

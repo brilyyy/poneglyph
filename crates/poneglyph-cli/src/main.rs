@@ -6,6 +6,7 @@ mod graph_registry;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::EnvFilter;
@@ -16,11 +17,29 @@ use poneglyph_core::llm::LlmClient;
 use poneglyph_core::model::{MemoryType, Source};
 use poneglyph_core::store::Store;
 
-/// Stone-tablet emblem, ASCII-rendered from viewer/public/logo.svg.
-/// Printed only on `init` — `mcp`'s stdout is reserved for MCP JSON-RPC.
-const BANNER: &str = include_str!("banner.txt");
+/// ponytail: minimal terminal-size check — only counts rows, ignores
+/// window-resize after startup (irrelevant for a one-shot startup banner).
+fn terminal_rows() -> Option<u16> {
+    use std::os::fd::AsRawFd;
+    #[repr(C)]
+    struct Winsize {
+        ws_row: u16,
+        ws_col: u16,
+        ws_xpixel: u16,
+        ws_ypixel: u16,
+    }
+    let mut ws = Winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+    let fd = std::io::stdout().as_raw_fd();
+    unsafe {
+        if libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 {
+            Some(ws.ws_row)
+        } else {
+            None
+        }
+    }
+}
 
-/// Full-color logo for the no-subcommand default view.
+/// Full-color logo for `init` and the no-subcommand default view.
 const LOGO: &str = include_str!("logo.ans");
 
 #[derive(Parser)]
@@ -319,7 +338,13 @@ fn cmd_init(
     global_rules: bool,
     project: Option<&Path>,
 ) -> Result<()> {
-    println!("\x1b[38;2;153;0;17m{BANNER}\x1b[0m");
+    if std::io::stdout().is_terminal() {
+        if let Some(rows) = terminal_rows() {
+            if rows >= 55 {
+                println!("{LOGO}");
+            }
+        }
+    }
 
     if write_global_config {
         init_global_config()?;
