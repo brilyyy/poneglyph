@@ -852,3 +852,25 @@ async fn activity_reports_pending_jobs_and_empty_phases() {
     assert_eq!(body["graph"]["dirty_projects"], json!([]));
     assert!(body["generated_at"].is_string());
 }
+
+// ---------------------------------------------------------------------------
+// /api/enrich
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn enrich_returns_memories_and_empty_codegraph_for_unknown_file() {
+    let (state, store) = open_state();
+    // Create a memory that mentions a filename and index it for FTS.
+    {
+        let s = store.lock().unwrap();
+        let mem = s.create_memory("fixed a bug in auth.rs login flow", MemoryType::Fact, 0.5, Source::Cli, None, None).unwrap();
+        s.index_fts(&mem.id, "fixed a bug in auth.rs login flow").unwrap();
+    }
+    let router = build_router(state);
+
+    let (status, body) = send(router, get("/api/enrich?file_path=/tmp/auth.rs&project_path=/tmp")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["context"].as_str().unwrap().contains("auth.rs"));
+    assert_eq!(body["memory_count"], 1);
+    assert_eq!(body["node_count"], 0, "no codegraph in tests");
+}

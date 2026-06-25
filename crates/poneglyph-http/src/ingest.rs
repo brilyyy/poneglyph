@@ -29,6 +29,12 @@ pub enum IngestEventKind {
     AssistantMessage,
     FileEdit,
     Terminal,
+    SessionStart,
+    SessionEnd,
+    SessionError,
+    Permission,
+    TodoUpdate,
+    CommandExec,
 }
 
 impl IngestEventKind {
@@ -39,13 +45,20 @@ impl IngestEventKind {
             Self::AssistantMessage => "assistant_message",
             Self::FileEdit => "file_edit",
             Self::Terminal => "terminal",
+            Self::SessionStart => "session_start",
+            Self::SessionEnd => "session_end",
+            Self::SessionError => "session_error",
+            Self::Permission => "permission",
+            Self::TodoUpdate => "todo_update",
+            Self::CommandExec => "command_exec",
         }
     }
 
     fn memory_type(&self) -> MemoryType {
         match self {
-            Self::ToolUse | Self::FileEdit | Self::Terminal => MemoryType::CodeContext,
-            Self::UserMessage | Self::AssistantMessage => MemoryType::Episodic,
+            Self::ToolUse | Self::FileEdit | Self::Terminal | Self::CommandExec => MemoryType::CodeContext,
+            Self::UserMessage | Self::AssistantMessage | Self::SessionStart | Self::SessionEnd | Self::SessionError | Self::Permission => MemoryType::Episodic,
+            Self::TodoUpdate => MemoryType::Procedural,
         }
     }
 }

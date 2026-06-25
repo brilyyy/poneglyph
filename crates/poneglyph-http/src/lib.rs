@@ -53,6 +53,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/search", get(api::search))
         .route("/graph", get(api::graph))
         .route("/context", get(api::project_context))
+        .route("/enrich", get(api::enrich))
         .route("/timeline", get(api::timeline))
         .route("/projects", get(api::list_projects))
         .route("/stats", get(api::stats))

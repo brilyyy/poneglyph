@@ -517,6 +517,104 @@ pub async fn project_context(
 }
 
 // ---------------------------------------------------------------------------
+// /api/enrich — file-level context for OpenCode's file enrichment layer:
+// memories mentioning the file + codegraph nodes defined in it.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct EnrichQuery {
+    /// Absolute file path to enrich.
+    pub file_path: String,
+    /// Absolute project path.
+    pub project_path: String,
+    /// Token budget for the context string (default 1000).
+    pub max_tokens: Option<usize>,
+}
+
+pub async fn enrich(
+    State(state): State<AppState>,
+    Query(q): Query<EnrichQuery>,
+) -> ApiResult<Value> {
+    if q.file_path.trim().is_empty() {
+        return Err(ApiError::bad_request("file_path must be non-empty"));
+    }
+    if q.project_path.trim().is_empty() {
+        return Err(ApiError::bad_request("project_path must be non-empty"));
+    }
+    let max_tokens = q.max_tokens.unwrap_or(1000).clamp(1, 16_000);
+
+    let store = state.lock_store()?;
+
+    // 1. Memories mentioning this file (FTS on file path basename).
+    let basename = std::path::Path::new(&q.file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&q.file_path);
+    let project_id = project_id_for(&store, &q.project_path)?;
+    let filters = RecallFilters {
+        memory_type: None,
+        project_id: project_id.clone(),
+        since: None,
+        tag: None,
+    };
+    let memories = poneglyph_core::retrieve::recall(
+        &store.conn,
+        None,
+        basename,
+        &filters,
+        10,
+        &state.config.retrieval,
+    )?;
+
+    // 2. Codegraph nodes in this file.
+    let code_nodes = match &project_id {
+        Some(pid) => {
+            // Use relative path for codegraph lookup.
+            let root = store
+                .get_project(&q.project_path)?
+                .map(|p| std::path::PathBuf::from(&p.path));
+            let rel = root
+                .as_ref()
+                .and_then(|r| std::path::Path::new(&q.file_path).strip_prefix(r).ok())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| q.file_path.clone());
+            store.cg_nodes_in_file(pid, &rel).unwrap_or_default()
+        }
+        None => vec![],
+    };
+
+    // 3. Assemble context string, truncated to max_tokens.
+    let mut parts = Vec::new();
+    if !memories.is_empty() {
+        parts.push("## Related memories".to_string());
+        for r in &memories {
+            parts.push(format!("- {}", r.memory.content));
+        }
+    }
+    if !code_nodes.is_empty() {
+        parts.push("## Code in this file".to_string());
+        for n in &code_nodes {
+            parts.push(format!("- {} {} ({}:{})", n.kind, n.name, n.file_path, n.start_line));
+        }
+    }
+
+    let context = parts.join("\n");
+    // ponytail: rough char-based truncation instead of tokenizer — good enough
+    // for a context hint, max_tokens is a soft budget.
+    let truncated = if context.len() > max_tokens * 4 {
+        &context[..max_tokens * 4]
+    } else {
+        &context
+    };
+
+    Ok(Json(json!({
+        "context": truncated,
+        "memory_count": memories.len(),
+        "node_count": code_nodes.len(),
+    })))
+}
+
+// ---------------------------------------------------------------------------
 // /api/timeline
 // ---------------------------------------------------------------------------
 
